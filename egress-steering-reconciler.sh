@@ -1,7 +1,7 @@
 #!/bin/bash
 # /usr/local/bin/egress-steering-reconciler.sh
 #
-# Steers egress traffic from a specific Pod IP through nodes labeled
+# Steers egress traffic from configured Pod IPs/CIDRs through nodes labeled
 # k8s.ovn.org/egress-assignable="", with SNAT on the egress node.
 # Self-determines role (worker vs egress) each reconcile cycle.
 #
@@ -15,16 +15,17 @@
 set -uo pipefail
 
 # --- Configuration ---
-KUBECONFIG="/etc/kubernetes/kubeconfig"
-POD_IP="10.132.2.29"
-FWMARK="0x2000"
-RT_TABLE="100"
-RT_PRIO="1000"
-CLUSTER_CIDRS="10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29"
-RECONCILE_INTERVAL=10
-PING_TIMEOUT=2
-NFT_TABLE_WORKER="egress-steering"
-NFT_TABLE_EGRESS="egress-snat"
+CONFIG_FILE="/etc/egress-steering/egress-steering.conf"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "[error] configuration file not found: ${CONFIG_FILE}"
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+# Derived / internal
 RP_FILTER_ORIG_FILE="/run/egress-steering-rp-filter.orig"
 
 # --- State tracking ---
@@ -119,7 +120,7 @@ flush table inet ${NFT_TABLE_WORKER}
 table inet ${NFT_TABLE_WORKER} {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
-    ip saddr ${POD_IP} ip daddr != { ${CLUSTER_CIDRS} } ct direction original meta mark set ${FWMARK}
+    ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } ct direction original meta mark set ${FWMARK}
   }
 }
 EOF
@@ -150,14 +151,14 @@ setup_egress() {
   sysctl -qw "net.ipv4.conf.${phys_iface}.rp_filter=2"
 
   # SNAT rule — remove this block if existing node SNAT rules already
-  # cover this Pod IP (check: nft list ruleset / iptables -t nat -L -n -v)
+  # cover these Pod CIDRs (check: nft list ruleset / iptables -t nat -L -n -v)
   nft -f - <<EOF
 table inet ${NFT_TABLE_EGRESS}
 flush table inet ${NFT_TABLE_EGRESS}
 table inet ${NFT_TABLE_EGRESS} {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr ${POD_IP} oifname "${phys_iface}" masquerade
+    ip saddr ${POD_CIDRS} oifname "${phys_iface}" masquerade
   }
 }
 EOF
@@ -204,7 +205,7 @@ main() {
   fi
   phys_iface=$(get_phys_iface)
 
-  echo "[init] node=${node_name} iface=${phys_iface}"
+  echo "[init] node=${node_name} iface=${phys_iface} pod_cidrs=${POD_CIDRS}"
 
   trap 'cleanup_all; exit 0' SIGTERM SIGINT
 
@@ -229,7 +230,7 @@ main() {
     if is_egress_node "$node_name"; then
       local desired_state="egress:${phys_iface}"
       if [ "$desired_state" != "$LAST_STATE" ]; then
-        echo "[egress] accepting steered traffic for ${POD_IP}, SNAT on ${phys_iface}"
+        echo "[egress] accepting steered traffic for ${POD_CIDRS}, SNAT on ${phys_iface}"
         cleanup_worker
         setup_egress "$phys_iface"
         LAST_STATE="$desired_state"
@@ -250,7 +251,7 @@ main() {
 
       local desired_state="worker:${healthy_ips}"
       if [ "$desired_state" != "$LAST_STATE" ]; then
-        echo "[worker] steering ${POD_IP} -> egress ECMP [$(echo "$healthy_ips" | tr '\n' ' ')]"
+        echo "[worker] steering ${POD_CIDRS} -> egress ECMP [$(echo "$healthy_ips" | tr '\n' ' ')]"
         cleanup_egress
         setup_worker "$healthy_ips"
         LAST_STATE="$desired_state"

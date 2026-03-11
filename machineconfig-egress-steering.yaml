@@ -16,6 +16,12 @@ spec:
           contents:
             # Base64-encode the script: base64 -w0 < egress-steering-reconciler.sh
             source: data:text/plain;charset=utf-8;base64,<BASE64_ENCODED_SCRIPT>
+        - path: /etc/egress-steering/egress-steering.conf
+          mode: 0644
+          overwrite: true
+          contents:
+            # Base64-encode the config: base64 -w0 < egress-steering.conf
+            source: data:text/plain;charset=utf-8;base64,<BASE64_ENCODED_CONFIG>
     systemd:
       units:
         - name: egress-steering.service

@@ -2,11 +2,11 @@
 
 ## 1. Overview
 
-This solution steers egress traffic from a specific Pod IP (`10.132.2.29`) through designated egress nodes — worker nodes labeled `k8s.ovn.org/egress-assignable=""`. Traffic is SNAT'd to the egress node's physical interface IP before leaving the cluster, rather than being SNAT'd to the local worker node's IP.
+This solution steers egress traffic from configured Pod IPs or CIDRs through designated egress nodes — worker nodes labeled `k8s.ovn.org/egress-assignable=""`. Traffic is SNAT'd to the egress node's physical interface IP before leaving the cluster, rather than being SNAT'd to the local worker node's IP.
 
 A bash reconciler script, deployed as a systemd service via MachineConfig, runs on every worker node. It self-determines whether the node is an egress node or a regular worker and configures nftables rules and policy routing accordingly. Egress node health is monitored via API status checks and direct ping probes, with automatic failover.
 
-Only external application traffic from the target Pod is steered. All other traffic — DNS, logging, metrics, infrastructure pods, and return traffic from externally-initiated connections — exits normally via the local node.
+Only external application traffic from the configured Pod IPs/CIDRs is steered. All other traffic — DNS, logging, metrics, infrastructure pods, and return traffic from externally-initiated connections — exits normally via the local node.
 
 ## 2. Architecture
 
@@ -23,12 +23,11 @@ Only external application traffic from the target Pod is steered. All other traf
   ┌─────▼──────┐      ┌─────▼──────┐      ┌─────▼──────┐
   │  Worker-1   │      │  Worker-2   │      │  Egress-1   │
   │             │      │             │      │  (labeled)  │
-  │ Pod         │      │             │      │             │
-  │ 10.132.2.29 │      │             │      │ nftables:   │
-  │             │      │             │      │ MASQUERADE  │
-  │ nftables:   │      │ nftables:   │      │             │
-  │ fwmark 0x2000      │ fwmark 0x2000      │ rp_filter=2 │
-  │             │      │ (no match)  │      │             │
+  │ Target Pods │      │             │      │             │
+  │             │      │             │      │ nftables:   │
+  │ nftables:   │      │ nftables:   │      │ MASQUERADE  │
+  │ fwmark 0x2000      │ fwmark 0x2000      │             │
+  │             │      │ (no match)  │      │ rp_filter=2 │
   │ policy route│      │             │      │             │
   │ table 100   │      │             │      │             │
   └──────┬──────┘      └─────────────┘      └──────┬──────┘
@@ -46,8 +45,9 @@ Only external application traffic from the target Pod is steered. All other traf
 
 ### Components
 
-- **Reconciler script** (`egress-steering-reconciler.sh`): bash script running as a systemd service on every worker node. Queries the API for egress node labels and health, then configures local nftables and routing.
-- **MachineConfig** (`machineconfig-egress-steering.yaml`): deploys the script and systemd unit to all nodes in the worker MachineConfigPool.
+- **Configuration file** (`egress-steering.conf`): defines which Pod IPs/CIDRs to steer, cluster CIDRs, and tuning parameters. Deployed to `/etc/egress-steering/egress-steering.conf`.
+- **Reconciler script** (`egress-steering-reconciler.sh`): bash script running as a systemd service on every worker node. Sources the config file, queries the API for egress node labels and health, then configures local nftables and routing.
+- **MachineConfig** (`machineconfig-egress-steering.yaml`): deploys the script, config file, and systemd unit to all nodes in the worker MachineConfigPool.
 - **nftables**: marks egress-bound packets on worker nodes; performs MASQUERADE on egress nodes.
 - **Policy routing**: steers marked packets to egress nodes via a dedicated routing table.
 
@@ -56,10 +56,10 @@ Only external application traffic from the target Pod is steered. All other traf
 ### Pod-initiated egress traffic (steered)
 
 ```
-1. Pod 10.132.2.29 sends packet to 8.8.8.8
+1. Target Pod sends packet to 8.8.8.8
 2. Packet enters host network stack via OVN (local gateway mode)
 3. Worker nftables PREROUTING:
-   - src=10.132.2.29 (matches POD_IP)
+   - src matches POD_CIDRS
    - dst=8.8.8.8 (not in cluster CIDRs)
    - ct direction = original (Pod initiated this connection)
    → meta mark set 0x2000
@@ -68,7 +68,7 @@ Only external application traffic from the target Pod is steered. All other traf
    - table 100: default via <egress-node-IP> (ECMP if multiple)
 5. Packet forwarded to egress node over physical network
 6. Egress node nftables POSTROUTING:
-   - src=10.132.2.29, oifname=<phys-iface>
+   - src matches POD_CIDRS, oifname=<phys-iface>
    → MASQUERADE (src becomes egress node IP)
 7. Packet exits to external network
 ```
@@ -77,8 +77,8 @@ Only external application traffic from the target Pod is steered. All other traf
 
 ```
 1. External host replies to egress node IP
-2. Egress node conntrack un-SNATs: dst → 10.132.2.29
-3. Egress node routes to 10.132.2.29 via OVN overlay
+2. Egress node conntrack un-SNATs: dst → original Pod IP
+3. Egress node routes to Pod IP via OVN overlay
 4. Packet delivered to Pod through br-int on the worker
    (does not traverse host nftables/routing again)
 ```
@@ -88,9 +88,9 @@ Only external application traffic from the target Pod is steered. All other traf
 ```
 1. External client connects to Pod via NodePort/LoadBalancer
 2. Connection tracked: original direction = External → Pod
-3. Pod replies: src=10.132.2.29, dst=external
+3. Pod replies: src=Pod IP, dst=external
 4. Worker nftables PREROUTING:
-   - src=10.132.2.29 (matches POD_IP)
+   - src matches POD_CIDRS
    - dst=external (not in cluster CIDRs)
    - ct direction = reply (external initiated this connection)
    → NO mark applied
@@ -108,25 +108,38 @@ Only external application traffic from the target Pod is steered. All other traf
 
 ## 5. Configuration
 
-All configuration is in the top section of `egress-steering-reconciler.sh`:
+All configuration lives in `/etc/egress-steering/egress-steering.conf` (source file: `egress-steering.conf`). The reconciler script sources this file at startup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `POD_CIDRS` | `10.132.2.29` | Pod IPs or CIDRs to steer (nftables set syntax) |
+| `CLUSTER_CIDRS` | `10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, link-local CIDRs) |
 | `KUBECONFIG` | `/etc/kubernetes/kubeconfig` | Path to kubeconfig for API access |
-| `POD_IP` | `10.132.2.29` | Pod IP to steer |
-| `FWMARK` | `0x2000` | Packet mark for policy routing |
+| `FWMARK` | `0x2000` | Packet mark for policy routing (must not conflict with other fwmarks) |
 | `RT_TABLE` | `100` | Routing table number for steered traffic |
 | `RT_PRIO` | `1000` | Priority of the ip rule |
-| `CLUSTER_CIDRS` | `10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, link-local CIDRs) |
 | `RECONCILE_INTERVAL` | `10` | Seconds between reconciliation cycles |
 | `PING_TIMEOUT` | `2` | Seconds to wait for ping reply from egress node |
 | `NFT_TABLE_WORKER` | `egress-steering` | nftables table name on worker nodes |
 | `NFT_TABLE_EGRESS` | `egress-snat` | nftables table name on egress nodes |
 
-To steer a different Pod or multiple Pods, modify `POD_IP`. For multiple IPs, use nftables set syntax:
+### POD_CIDRS examples
 
-```
-POD_IP="{ 10.132.2.29, 10.132.2.30, 10.132.3.0/24 }"
+```bash
+# Single IP
+POD_CIDRS="10.132.2.29"
+
+# Multiple IPs
+POD_CIDRS="{ 10.132.2.29, 10.132.2.30 }"
+
+# CIDR range
+POD_CIDRS="10.132.2.0/24"
+
+# Multiple CIDRs
+POD_CIDRS="{ 10.132.2.0/24, 10.132.3.0/24 }"
+
+# Mixed IPs and CIDRs
+POD_CIDRS="{ 10.132.2.29, 10.132.3.0/24 }"
 ```
 
 Update `CLUSTER_CIDRS` to match your cluster's Pod and Service CIDRs.
@@ -139,20 +152,28 @@ Update `CLUSTER_CIDRS` to match your cluster's Pod and Service CIDRs.
 oc label node <node-name> k8s.ovn.org/egress-assignable=""
 ```
 
-### Step 2: Base64-encode the script
+### Step 2: Edit the configuration
+
+Edit `egress-steering.conf` to set `POD_CIDRS` and `CLUSTER_CIDRS` for your environment.
+
+### Step 3: Base64-encode the files
 
 ```bash
 BASE64_SCRIPT=$(base64 -w0 < egress-steering-reconciler.sh)
+BASE64_CONFIG=$(base64 -w0 < egress-steering.conf)
 ```
 
-### Step 3: Inject into MachineConfig
+### Step 4: Inject into MachineConfig
 
 ```bash
-sed "s|<BASE64_ENCODED_SCRIPT>|${BASE64_SCRIPT}|" machineconfig-egress-steering.yaml \
+sed \
+  -e "s|<BASE64_ENCODED_SCRIPT>|${BASE64_SCRIPT}|" \
+  -e "s|<BASE64_ENCODED_CONFIG>|${BASE64_CONFIG}|" \
+  machineconfig-egress-steering.yaml \
   > machineconfig-egress-steering-final.yaml
 ```
 
-### Step 4: Apply
+### Step 5: Apply
 
 ```bash
 oc apply -f machineconfig-egress-steering-final.yaml
@@ -164,12 +185,12 @@ This triggers a rolling reboot of all worker nodes managed by the worker Machine
 oc get mcp worker -w
 ```
 
-### Step 5: Verify
+### Step 6: Verify
 
 After all nodes are updated and running:
 
 ```bash
-# On a worker node hosting the Pod:
+# On a worker node hosting target Pods:
 oc debug node/<worker-node> -- chroot /host journalctl -u egress-steering -f
 
 # Check nftables rules:
@@ -229,7 +250,7 @@ The kernel distributes flows across nexthops using a hash of the packet's 5-tupl
 
 ### Traffic that IS steered
 
-- Packets from Pod IP `10.132.2.29` to destinations outside the cluster CIDRs, where the connection was initiated by the Pod (`ct direction original`).
+- Packets from IPs/CIDRs matching `POD_CIDRS` to destinations outside `CLUSTER_CIDRS`, where the connection was initiated by the Pod (`ct direction original`).
 
 ### Traffic that is NOT steered
 
@@ -239,7 +260,7 @@ The kernel distributes flows across nexthops using a hash of the packet's 5-tupl
 | DNS to cluster CoreDNS | Service IP `172.30.0.10` is in `172.30.0.0/16` |
 | Link-local / metadata | Destination in `169.254.169.0/29` |
 | Return traffic for externally-initiated connections | `ct direction reply` — nftables rule does not match |
-| Traffic from any other Pod or infra workload | Source IP does not match `10.132.2.29` |
+| Traffic from Pods not matching `POD_CIDRS` | Source IP does not match configured CIDRs |
 
 ## 10. Troubleshooting
 
@@ -250,13 +271,19 @@ oc debug node/<node> -- chroot /host systemctl status egress-steering
 oc debug node/<node> -- chroot /host journalctl -u egress-steering --no-pager -n 50
 ```
 
+### Check the active configuration
+
+```bash
+oc debug node/<node> -- chroot /host cat /etc/egress-steering/egress-steering.conf
+```
+
 ### Check nftables rules on a worker node
 
 ```bash
 oc debug node/<node> -- chroot /host nft list table inet egress-steering
 ```
 
-Expected output:
+Expected output (example with single IP):
 
 ```
 table inet egress-steering {
@@ -298,7 +325,7 @@ oc debug node/<node> -- chroot /host ip route show table 100
 
 ### Verify traffic is being steered
 
-From the worker node hosting the Pod:
+From the worker node hosting target Pods:
 
 ```bash
 # Watch marked packets:
@@ -306,26 +333,27 @@ oc debug node/<node> -- chroot /host nft list ruleset -a
 # Or use counters — add a counter to the nftables rule temporarily
 
 # Check conntrack entries:
-oc debug node/<node> -- chroot /host conntrack -L -s 10.132.2.29
+oc debug node/<node> -- chroot /host conntrack -L -s <pod-ip>
 ```
 
 From the egress node:
 
 ```bash
 # Watch SNAT'd traffic:
-oc debug node/<egress-node> -- chroot /host conntrack -L -s 10.132.2.29
+oc debug node/<egress-node> -- chroot /host conntrack -L -s <pod-ip>
 ```
 
 ### Common issues
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
+| Reconciler exits with "configuration file not found" | Config file not deployed | Verify `/etc/egress-steering/egress-steering.conf` exists |
 | Reconciler exits with "cannot reach API" | Kubeconfig missing or expired | Verify `/etc/kubernetes/kubeconfig` exists and is valid |
 | Reconciler exits with "cannot determine node name" | Node InternalIP mismatch | Check `ip route get 1.1.1.1` returns the correct node IP |
-| Traffic not steered | Pod not on this node / wrong Pod IP | Verify `POD_IP` and that the Pod is scheduled on a node with the nftables rule |
+| Traffic not steered | Pod not on this node / wrong Pod CIDR | Verify `POD_CIDRS` in config and that the Pod is scheduled on a node with the nftables rule |
 | Traffic black-holed | Egress node not forwarding | Check `ip_forward=1` and `rp_filter=2` on egress node |
 | Return traffic dropped on egress node | Strict rp_filter | Verify `rp_filter=2` on the egress node's physical interface |
-| SNAT not happening | Existing SNAT rules don't cover this Pod IP | Add the MASQUERADE rule in `setup_egress` (enabled by default) |
+| SNAT not happening | Existing SNAT rules don't cover these Pod CIDRs | Add the MASQUERADE rule in `setup_egress` (enabled by default) |
 
 ## 11. Cleanup and Removal
 
@@ -335,7 +363,7 @@ oc debug node/<egress-node> -- chroot /host conntrack -L -s 10.132.2.29
 oc delete machineconfig 99-egress-steering
 ```
 
-This triggers a rolling reboot of all worker nodes, removing the script and systemd unit.
+This triggers a rolling reboot of all worker nodes, removing the script, config file, and systemd unit.
 
 ### Manual cleanup (without reboot)
 
@@ -362,9 +390,10 @@ The cleanup subcommand removes:
 
 - **Local gateway mode only**: this solution intercepts traffic in the host network stack. In shared gateway mode, OVN handles egress routing in OVS and packets never reach the host's nftables.
 - **L2 adjacency required**: worker nodes and egress nodes must be on the same L2 segment. If they are not, a tunnel-based approach (VXLAN or GRE) is needed instead of direct IP routing.
-- **Static Pod IP**: the solution targets a specific Pod IP. If the Pod is rescheduled and gets a new IP, the configuration must be updated. Consider using a Pod CIDR range if the Pod IP is not stable.
+- **Pod IP stability**: if target Pods are rescheduled and receive new IPs, the configuration must be updated. Use CIDR ranges in `POD_CIDRS` for more stable targeting.
 - **SNAT may already exist**: depending on the OVN-Kubernetes version and configuration, existing SNAT rules on the egress node may already cover Pod traffic. Check before deploying — the MASQUERADE rule in `setup_egress` may be redundant.
 - **Conntrack on egress node**: SNAT conntrack entries live on the egress node. If the egress node fails, all connections through it break regardless of the failover strategy.
 - **MachineConfig triggers reboots**: applying or removing the MachineConfig causes a rolling reboot of all worker nodes. Plan accordingly.
+- **Configuration changes require MachineConfig update**: since the config file is deployed via MachineConfig, changing `POD_CIDRS` requires updating and re-applying the MachineConfig (triggering a rolling reboot). Alternatively, edit the config file directly on each node and restart the service — but this change will not persist across MachineConfig re-application.
 - **Single reconciler per node**: the systemd service runs one instance per node. There is no cross-node coordination — each node independently determines its role and selects the same active egress node(s) because the selection is deterministic (sorted by name, filtered by health).
 - **No IPv6 support**: the nftables rules use `ip saddr` / `ip daddr` (IPv4 only). For dual-stack clusters, add equivalent `ip6` rules.
