@@ -1,0 +1,37 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-egress-steering
+  labels:
+    machineconfiguration.openshift.io/role: worker
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - path: /usr/local/bin/egress-steering-reconciler.sh
+          mode: 0755
+          overwrite: true
+          contents:
+            # Base64-encode the script: base64 -w0 < egress-steering-reconciler.sh
+            source: data:text/plain;charset=utf-8;base64,<BASE64_ENCODED_SCRIPT>
+    systemd:
+      units:
+        - name: egress-steering.service
+          enabled: true
+          contents: |
+            [Unit]
+            Description=Egress traffic steering reconciler
+            After=network-online.target kubelet.service
+            Wants=network-online.target
+
+            [Service]
+            Type=simple
+            ExecStart=/usr/local/bin/egress-steering-reconciler.sh
+            ExecStop=/usr/local/bin/egress-steering-reconciler.sh cleanup
+            Restart=on-failure
+            RestartSec=10
+
+            [Install]
+            WantedBy=multi-user.target
