@@ -37,10 +37,6 @@ get_self_ip() {
   ip route get 1.1.1.1 | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1
 }
 
-get_phys_iface() {
-  ip route get 1.1.1.1 | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1
-}
-
 get_node_name() {
   local self_ip
   self_ip=$(get_self_ip)
@@ -142,23 +138,29 @@ cleanup_worker() {
 }
 
 setup_egress() {
-  local phys_iface="$1"
-
-  # Save original rp_filter value before overwriting
+  # Save original rp_filter values before overwriting
   if [ ! -f "$RP_FILTER_ORIG_FILE" ]; then
-    sysctl -n "net.ipv4.conf.${phys_iface}.rp_filter" > "$RP_FILTER_ORIG_FILE"
+    sysctl -a 2>/dev/null | grep '\.rp_filter\s*=' > "$RP_FILTER_ORIG_FILE"
   fi
-  sysctl -qw "net.ipv4.conf.${phys_iface}.rp_filter=2"
+
+  # Set rp_filter to loose mode on all interfaces so packets with Pod source
+  # IPs are not dropped regardless of which interface they arrive on
+  for f in /proc/sys/net/ipv4/conf/*/rp_filter; do
+    echo 2 > "$f"
+  done
 
   # SNAT rule — remove this block if existing node SNAT rules already
-  # cover these Pod CIDRs (check: nft list ruleset / iptables -t nat -L -n -v)
+  # cover these Pod CIDRs (check: nft list ruleset / iptables -t nat -L -n -v).
+  # No oifname constraint: the egress interface depends on the destination
+  # route in the main routing table. Cluster-internal destinations are
+  # excluded to avoid masquerading OVN overlay traffic.
   nft -f - <<EOF
 table inet ${NFT_TABLE_EGRESS}
 flush table inet ${NFT_TABLE_EGRESS}
 table inet ${NFT_TABLE_EGRESS} {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr ${POD_CIDRS} oifname "${phys_iface}" masquerade
+    ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } masquerade
   }
 }
 EOF
@@ -167,10 +169,10 @@ EOF
 cleanup_egress() {
   nft delete table inet "$NFT_TABLE_EGRESS" 2>/dev/null || true
   if [ -f "$RP_FILTER_ORIG_FILE" ]; then
-    local phys_iface orig
-    phys_iface=$(get_phys_iface)
-    orig=$(cat "$RP_FILTER_ORIG_FILE")
-    sysctl -qw "net.ipv4.conf.${phys_iface}.rp_filter=${orig}"
+    while IFS='= ' read -r key value; do
+      [ -z "$key" ] && continue
+      sysctl -qw "${key}=${value}" 2>/dev/null || true
+    done < "$RP_FILTER_ORIG_FILE"
     rm -f "$RP_FILTER_ORIG_FILE"
   fi
 }
@@ -197,15 +199,14 @@ main() {
     exit 1
   fi
 
-  local node_name phys_iface
+  local node_name
   node_name=$(get_node_name)
   if [ -z "$node_name" ]; then
     echo "[error] cannot determine node name"
     exit 1
   fi
-  phys_iface=$(get_phys_iface)
 
-  echo "[init] node=${node_name} iface=${phys_iface} pod_cidrs=${POD_CIDRS}"
+  echo "[init] node=${node_name} pod_cidrs=${POD_CIDRS}"
 
   trap 'cleanup_all; exit 0' SIGTERM SIGINT
 
@@ -228,11 +229,11 @@ main() {
     fi
 
     if is_egress_node "$node_name"; then
-      local desired_state="egress:${phys_iface}"
+      local desired_state="egress"
       if [ "$desired_state" != "$LAST_STATE" ]; then
-        echo "[egress] accepting steered traffic for ${POD_CIDRS}, SNAT on ${phys_iface}"
+        echo "[egress] accepting steered traffic for ${POD_CIDRS}"
         cleanup_worker
-        setup_egress "$phys_iface"
+        setup_egress
         LAST_STATE="$desired_state"
       fi
     else

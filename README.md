@@ -26,7 +26,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
   │ Target Pods │      │             │      │             │
   │             │      │             │      │ nftables:   │
   │ nftables:   │      │ nftables:   │      │ MASQUERADE  │
-  │ fwmark 0x2000      │ fwmark 0x2000      │             │
+  │ fwmark 0x2000      │ fwmark 0x2000      │ (all ifaces)│
   │             │      │ (no match)  │      │ rp_filter=2 │
   │ policy route│      │             │      │             │
   │ table 100   │      │             │      │             │
@@ -68,7 +68,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
    - table 100: default via <egress-node-IP> (ECMP if multiple)
 5. Packet forwarded to egress node over physical network
 6. Egress node nftables POSTROUTING:
-   - src matches POD_CIDRS, oifname=<phys-iface>
+   - src matches POD_CIDRS, dst not in CLUSTER_CIDRS
    → MASQUERADE (src becomes egress node IP)
 7. Packet exits to external network
 ```
@@ -305,7 +305,7 @@ Expected output:
 table inet egress-snat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr 10.132.2.29 oifname "ens4" masquerade
+    ip saddr 10.132.2.29 ip daddr != { 10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } masquerade
   }
 }
 ```
@@ -351,7 +351,7 @@ oc debug node/<egress-node> -- chroot /host conntrack -L -s <pod-ip>
 | Reconciler exits with "cannot determine node name" | Node InternalIP mismatch | Check `ip route get 1.1.1.1` returns the correct node IP |
 | Traffic not steered | Pod not on this node / wrong Pod CIDR | Verify `POD_CIDRS` in config and that the Pod is scheduled on a node with the nftables rule |
 | Traffic black-holed | Egress node not forwarding | Check `ip_forward=1` and `rp_filter=2` on egress node |
-| Return traffic dropped on egress node | Strict rp_filter | Verify `rp_filter=2` on the egress node's physical interface |
+| Return traffic dropped on egress node | Strict rp_filter | Verify `rp_filter=2` on all egress node interfaces |
 | SNAT not happening | Existing SNAT rules don't cover these Pod CIDRs | Add the MASQUERADE rule in `setup_egress` (enabled by default) |
 
 ## 11. Cleanup and Removal
