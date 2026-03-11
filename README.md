@@ -156,24 +156,23 @@ oc label node <node-name> k8s.ovn.org/egress-assignable=""
 
 Edit `egress-steering.conf` to set `POD_CIDRS` and `CLUSTER_CIDRS` for your environment.
 
-### Step 3: Base64-encode the files
+### Step 3: Generate the final MachineConfig
 
 ```bash
-BASE64_SCRIPT=$(base64 -w0 < egress-steering-reconciler.sh)
-BASE64_CONFIG=$(base64 -w0 < egress-steering.conf)
+./generate-machineconfig.sh
 ```
 
-### Step 4: Inject into MachineConfig
+This base64-encodes the script and config file into the MachineConfig template, producing `machineconfig-egress-steering-final.yaml`.
+
+Options:
 
 ```bash
-sed \
-  -e "s|<BASE64_ENCODED_SCRIPT>|${BASE64_SCRIPT}|" \
-  -e "s|<BASE64_ENCODED_CONFIG>|${BASE64_CONFIG}|" \
-  machineconfig-egress-steering.yaml \
-  > machineconfig-egress-steering-final.yaml
+./generate-machineconfig.sh -h              # show usage
+./generate-machineconfig.sh -c my.conf      # use a custom config file
+./generate-machineconfig.sh -o output.yaml  # custom output path
 ```
 
-### Step 5: Apply
+### Step 4: Apply
 
 ```bash
 oc apply -f machineconfig-egress-steering-final.yaml
