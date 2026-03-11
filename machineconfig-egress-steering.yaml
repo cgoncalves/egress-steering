@@ -22,6 +22,18 @@ spec:
           contents:
             # Base64-encode the config: base64 -w0 < egress-steering.conf
             source: data:text/plain;charset=utf-8;base64,<BASE64_ENCODED_CONFIG>
+        - path: /etc/egress-steering/ca.crt
+          mode: 0644
+          overwrite: true
+          contents:
+            # Base64-encode the CA cert: base64 -w0 < ca.crt
+            source: data:text/plain;charset=utf-8;base64,<BASE64_ENCODED_CA>
+        - path: /etc/egress-steering/token
+          mode: 0600
+          overwrite: true
+          contents:
+            # Base64-encode the token: base64 -w0 < token
+            source: data:text/plain;charset=utf-8;base64,<BASE64_ENCODED_TOKEN>
     systemd:
       units:
         - name: egress-steering.service

@@ -27,6 +27,7 @@ source "$CONFIG_FILE"
 
 # Derived / internal
 RP_FILTER_ORIG_FILE="/run/egress-steering-rp-filter.orig"
+OC_ARGS="--server=${API_SERVER} --certificate-authority=${CA_FILE} --token=$(cat "${TOKEN_FILE}")"
 
 # --- State tracking ---
 LAST_STATE=""
@@ -40,7 +41,7 @@ get_self_ip() {
 get_node_name() {
   local self_ip
   self_ip=$(get_self_ip)
-  oc --kubeconfig="$KUBECONFIG" get nodes -o json 2>/dev/null \
+  oc ${OC_ARGS} get nodes -o json 2>/dev/null \
   | jq -r --arg ip "$self_ip" '
     .items[]
     | select(.status.addresses[] | select(.type=="InternalIP" and .address==$ip))
@@ -50,7 +51,7 @@ get_node_name() {
 
 is_egress_node() {
   local labels
-  labels=$(oc --kubeconfig="$KUBECONFIG" get node "$1" \
+  labels=$(oc ${OC_ARGS} get node "$1" \
     -o jsonpath='{.metadata.labels}' 2>/dev/null)
   echo "$labels" | grep -q 'k8s.ovn.org/egress-assignable'
 }
@@ -59,7 +60,7 @@ is_egress_node() {
 # Returns non-zero on API failure so the caller can distinguish "no nodes" from "API down".
 get_egress_nodes() {
   local output rc
-  output=$(oc --kubeconfig="$KUBECONFIG" get nodes \
+  output=$(oc ${OC_ARGS} get nodes \
     -l 'k8s.ovn.org/egress-assignable=' \
     -o json 2>&1)
   rc=$?
@@ -194,8 +195,8 @@ main() {
   fi
 
   # Validate API access before entering the loop
-  if ! oc --kubeconfig="$KUBECONFIG" get nodes &>/dev/null; then
-    echo "[error] cannot reach API with kubeconfig ${KUBECONFIG}"
+  if ! oc ${OC_ARGS} get nodes &>/dev/null; then
+    echo "[error] cannot reach API at ${API_SERVER}"
     exit 1
   fi
 

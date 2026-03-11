@@ -104,7 +104,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 - **L2 adjacency**: worker nodes and egress nodes must be on the same L2 network (no tunnels are used between them).
 - **RHCOS / Fedora CoreOS**: the MachineConfig targets OpenShift worker nodes running RHCOS.
 - **Tools on nodes**: `oc`, `jq`, `nft`, `ping`, `ip`, `sysctl` must be available on the nodes.
-- **Kubeconfig**: the kubelet kubeconfig at `/etc/kubernetes/kubeconfig` must have permissions to list nodes.
+- **API access**: a ServiceAccount with node-list permissions, its token and the API server CA certificate deployed to the nodes (see Deployment).
 
 ## 5. Configuration
 
@@ -114,7 +114,9 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 |----------|---------|-------------|
 | `POD_CIDRS` | `10.132.2.29` | Pod IPs or CIDRs to steer (nftables set syntax) |
 | `CLUSTER_CIDRS` | `10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, link-local CIDRs) |
-| `KUBECONFIG` | `/etc/kubernetes/kubeconfig` | Path to kubeconfig for API access |
+| `API_SERVER` | `https://api-int.example.com:6443` | API server URL |
+| `CA_FILE` | `/etc/egress-steering/ca.crt` | Path to the API server CA certificate |
+| `TOKEN_FILE` | `/etc/egress-steering/token` | Path to the ServiceAccount token file |
 | `FWMARK` | `0x2000` | Packet mark for policy routing (must not conflict with other fwmarks) |
 | `RT_TABLE` | `100` | Routing table number for steered traffic |
 | `RT_PRIO` | `1000` | Priority of the ip rule |
@@ -152,27 +154,37 @@ Update `CLUSTER_CIDRS` to match your cluster's Pod and Service CIDRs.
 oc label node <node-name> k8s.ovn.org/egress-assignable=""
 ```
 
-### Step 2: Edit the configuration
-
-Edit `egress-steering.conf` to set `POD_CIDRS` and `CLUSTER_CIDRS` for your environment.
-
-### Step 3: Generate the final MachineConfig
+### Step 2: Create ServiceAccount and extract credentials
 
 ```bash
-./generate-machineconfig.sh
+./setup-serviceaccount.sh create -o /tmp/egress-steering-creds
 ```
 
-This base64-encodes the script and config file into the MachineConfig template, producing `machineconfig-egress-steering-final.yaml`.
+This creates the ServiceAccount, ClusterRole, ClusterRoleBinding, and token Secret, then extracts the CA certificate and token to the output directory.
+
+### Step 3: Edit the configuration
+
+Edit `egress-steering.conf` to set `POD_CIDRS`, `CLUSTER_CIDRS`, and `API_SERVER` for your environment.
+
+### Step 4: Generate the final MachineConfig
+
+```bash
+./generate-machineconfig.sh \
+  -a /tmp/egress-steering-creds/ca.crt \
+  -k /tmp/egress-steering-creds/token
+```
+
+This base64-encodes the script, config, CA certificate, and token into the MachineConfig template, producing `machineconfig-egress-steering-final.yaml`.
 
 Options:
 
 ```bash
 ./generate-machineconfig.sh -h              # show usage
-./generate-machineconfig.sh -c my.conf      # use a custom config file
-./generate-machineconfig.sh -o output.yaml  # custom output path
+./generate-machineconfig.sh -c my.conf ...  # use a custom config file
+./generate-machineconfig.sh -o output.yaml ... # custom output path
 ```
 
-### Step 4: Apply
+### Step 5: Apply
 
 ```bash
 oc apply -f machineconfig-egress-steering-final.yaml
@@ -347,7 +359,7 @@ oc debug node/<egress-node> -- chroot /host conntrack -L -s <pod-ip>
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | Reconciler exits with "configuration file not found" | Config file not deployed | Verify `/etc/egress-steering/egress-steering.conf` exists |
-| Reconciler exits with "cannot reach API" | Kubeconfig missing or expired | Verify `/etc/kubernetes/kubeconfig` exists and is valid |
+| Reconciler exits with "cannot reach API" | Token expired, CA missing, or wrong API_SERVER | Verify `/etc/egress-steering/token` and `/etc/egress-steering/ca.crt` exist; check `API_SERVER` in config |
 | Reconciler exits with "cannot determine node name" | Node InternalIP mismatch | Check `ip route get 1.1.1.1` returns the correct node IP |
 | Traffic not steered | Pod not on this node / wrong Pod CIDR | Verify `POD_CIDRS` in config and that the Pod is scheduled on a node with the nftables rule |
 | Traffic black-holed | Egress node not forwarding | Check `ip_forward=1` and `rp_filter=2` on egress node |
@@ -362,7 +374,13 @@ oc debug node/<egress-node> -- chroot /host conntrack -L -s <pod-ip>
 oc delete machineconfig 99-egress-steering
 ```
 
-This triggers a rolling reboot of all worker nodes, removing the script, config file, and systemd unit.
+This triggers a rolling reboot of all worker nodes, removing the script, config, token, CA, and systemd unit.
+
+### Remove the ServiceAccount and RBAC
+
+```bash
+./setup-serviceaccount.sh delete
+```
 
 ### Manual cleanup (without reboot)
 
