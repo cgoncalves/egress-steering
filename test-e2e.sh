@@ -260,6 +260,31 @@ test_cluster_dns() {
   fi
 }
 
+test_node_connectivity() {
+  log_info "Verifying Pod-to-Node (machine network) traffic is not steered..."
+
+  # Get a node InternalIP to test against
+  local node_ip
+  node_ip=$(oc get node "$TEST_POD_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | awk '{print $1}')
+
+  if [ -z "$node_ip" ]; then
+    log_skip "Could not determine node IP"
+    return
+  fi
+
+  # curl the kubelet health endpoint on the node
+  local kubelet_code
+  kubelet_code=$(oc exec -n "$TEST_NS" "$TEST_POD" -- \
+    curl -sk --max-time 5 -o /dev/null -w "%{http_code}" \
+    "https://${node_ip}:10250/healthz" 2>/dev/null)
+
+  if [ "$kubelet_code" = "200" ] || [ "$kubelet_code" = "401" ] || [ "$kubelet_code" = "403" ]; then
+    log_pass "Pod-to-Node connectivity works (HTTP ${kubelet_code} to ${node_ip})"
+  else
+    log_fail "Pod-to-Node connectivity failed (HTTP ${kubelet_code:-timeout} to ${node_ip})"
+  fi
+}
+
 test_cluster_internal() {
   log_info "Verifying cluster-internal traffic is not steered..."
 
@@ -307,6 +332,9 @@ main() {
   echo ""
 
   test_cluster_dns
+  echo ""
+
+  test_node_connectivity
   echo ""
 
   test_cluster_internal

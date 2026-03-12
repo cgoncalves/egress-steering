@@ -8,6 +8,8 @@ A bash reconciler script, deployed as a systemd service via MachineConfig, runs 
 
 Only external application traffic from the configured Pod IPs/CIDRs is steered. All other traffic — DNS, logging, metrics, infrastructure pods, and return traffic from externally-initiated connections — exits normally via the local node.
 
+![Traffic Flows](docs/egress-steering-traffic-flows.svg)
+
 ## 2. Architecture
 
 ```
@@ -127,7 +129,7 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `POD_CIDRS` | `10.132.0.0/14` | Pod IPs or CIDRs to steer (nftables set syntax) |
-| `CLUSTER_CIDRS` | `10.132.0.0/14, 172.30.0.0/16, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, link-local CIDRs) |
+| `CLUSTER_CIDRS` | `10.132.0.0/14, 172.30.0.0/16, 10.6.105.0/24, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, Machine, link-local CIDRs) |
 | `API_SERVER` | `https://api-int.example.com:6443` | API server URL |
 | `CA_FILE` | `/etc/egress-steering/ca.crt` | Path to the API server CA certificate |
 | `TOKEN_FILE` | `/etc/egress-steering/token` | Path to the ServiceAccount token file |
@@ -161,7 +163,7 @@ POD_CIDRS="{ 10.132.2.0/24, 10.132.3.0/24 }"
 POD_CIDRS="{ 10.132.2.29, 10.132.3.0/24 }"
 ```
 
-Update `CLUSTER_CIDRS` to match your cluster's Pod and Service CIDRs.
+Update `CLUSTER_CIDRS` to match your cluster's Pod, Service, and Machine network CIDRs.
 
 ## 6. Deployment
 
@@ -267,6 +269,7 @@ The test script runs the following phases:
 | `test_external_connectivity` | `curl` from the pod to `1.1.1.1:80` returns a non-zero HTTP status code |
 | `test_traffic_steered` | After curling, checks the worker's conntrack for a replied entry for `1.1.1.1`, confirming traffic went through the host stack and was policy-routed. Skips if the pod is on an egress node. |
 | `test_cluster_dns` | `getent hosts kubernetes.default.svc.cluster.local` resolves, confirming DNS traffic is not steered |
+| `test_node_connectivity` | `curl` to the kubelet on the node's InternalIP returns 200/401/403, confirming machine network traffic is not steered |
 | `test_cluster_internal` | `curl` to the cluster API returns 200/401/403, confirming cluster-internal traffic is not steered |
 
 Exits with code 1 if any test failed, 0 if all passed.
@@ -327,6 +330,7 @@ The kernel distributes flows across nexthops using a hash of the packet's 5-tupl
 | Traffic type | Why excluded |
 |---|---|
 | Cluster-internal (Pod-to-Pod, Pod-to-Service) | Destination in `10.132.0.0/14` or `172.30.0.0/16` |
+| Pod-to-Node (machine network) | Destination in `10.6.105.0/24` |
 | DNS to cluster CoreDNS | Service IP `172.30.0.10` is in `172.30.0.0/16` |
 | Link-local / metadata | Destination in `169.254.169.0/29` |
 | Return traffic for externally-initiated connections | `ct direction reply` — nftables rule does not match |
@@ -359,7 +363,7 @@ Expected output:
 table inet egress-steering {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
-    ip saddr 10.132.0.0/14 ip daddr != { 10.132.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } ct direction original meta mark set 0x00002000
+    ip saddr 10.132.0.0/14 ip daddr != { 10.132.0.0/14, 172.30.0.0/16, 10.6.105.0/24, 169.254.169.0/29 } ct direction original meta mark set 0x00002000
   }
 }
 ```
@@ -376,7 +380,7 @@ Expected output:
 table inet egress-snat {
   chain forward {
     type filter hook forward priority filter - 1; policy accept;
-    ip daddr != { 10.132.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } meta mark set 0x00003000
+    ip daddr != { 10.132.0.0/14, 172.30.0.0/16, 10.6.105.0/24, 169.254.169.0/29 } meta mark set 0x00003000
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
