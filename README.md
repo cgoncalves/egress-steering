@@ -249,7 +249,25 @@ oc debug node/<worker-node> -- chroot /host ip route show table 100
 ./test-e2e.sh
 ```
 
-This creates a temporary test namespace and pod, verifies the service is running on all nodes, checks nftables and routing rules, tests external connectivity and traffic steering, and confirms cluster-internal traffic is unaffected.
+The test script runs the following phases:
+
+**Preflight** — aborts early if any prerequisite is missing (`routingViaHost`, `ipForwarding: Global`, egress node labels, worker nodes, API access).
+
+**Setup** — creates a temporary namespace (`egress-steering-test`) and a test pod. Cleanup is registered via `trap` so the namespace is always deleted on exit.
+
+**Tests:**
+
+| Test | What it checks |
+|---|---|
+| `test_service_running` | `systemctl is-active egress-steering` on every worker node |
+| `test_worker_nftables` | `inet egress-steering` table has a prerouting mark rule and routing table 100 has a default route. If the pod landed on an egress node, checks an alternate non-egress worker instead. |
+| `test_egress_nftables` | `inet egress-snat` table has a masquerade rule on every labeled egress node |
+| `test_external_connectivity` | `curl` from the pod to `1.1.1.1:80` returns a non-zero HTTP status code |
+| `test_traffic_steered` | After curling, checks the worker's conntrack for a replied entry for `1.1.1.1`, confirming traffic went through the host stack and was policy-routed. Skips if the pod is on an egress node. |
+| `test_cluster_dns` | `getent hosts kubernetes.default.svc.cluster.local` resolves, confirming DNS traffic is not steered |
+| `test_cluster_internal` | `curl` to the cluster API returns 200/401/403, confirming cluster-internal traffic is not steered |
+
+Exits with code 1 if any test failed, 0 if all passed.
 
 ## 7. Health Detection and Failover
 
