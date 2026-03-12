@@ -131,6 +131,8 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 | `API_SERVER` | `https://api-int.example.com:6443` | API server URL |
 | `CA_FILE` | `/etc/egress-steering/ca.crt` | Path to the API server CA certificate |
 | `TOKEN_FILE` | `/etc/egress-steering/token` | Path to the ServiceAccount token file |
+| `POD_CIDRS_V6` | *(empty)* | IPv6 Pod CIDRs to steer (optional, nftables set syntax) |
+| `CLUSTER_CIDRS_V6` | *(empty)* | IPv6 cluster-internal CIDRs excluded from steering (required if `POD_CIDRS_V6` is set) |
 | `FWMARK` | `0x2000` | Packet mark for policy routing (must not conflict with other fwmarks) |
 | `RT_TABLE` | `100` | Routing table number for steered traffic |
 | `RT_PRIO` | `1000` | Priority of the ip rule |
@@ -474,4 +476,4 @@ The cleanup subcommand removes:
 - **MachineConfig triggers reboots by default**: without the `MachineConfiguration` node disruption policy patch, applying or removing the MachineConfig causes a rolling reboot. Apply `machineconfiguration-patch.yaml` to restart the service instead of rebooting when the script, config, CA, or token files change.
 - **Configuration changes require MachineConfig update**: since the config file is deployed via MachineConfig, changing `POD_CIDRS` requires updating and re-applying the MachineConfig. With the node disruption policy, this restarts the service without rebooting. Alternatively, edit the config file directly on each node and restart the service — but this change will not persist across MachineConfig re-application.
 - **Single reconciler per node**: the systemd service runs one instance per node. There is no cross-node coordination — each node independently determines its role and selects the same active egress node(s) because the selection is deterministic (sorted by name, filtered by health).
-- **No IPv6 support**: the nftables rules use `ip saddr` / `ip daddr` (IPv4 only). For dual-stack clusters, add equivalent `ip6` rules.
+- **IPv6 support is optional**: set `POD_CIDRS_V6` and `CLUSTER_CIDRS_V6` to enable IPv6 steering. Both IPv4 and IPv6 rules coexist in the same `inet` family nftables table. IPv6 policy routing requires egress nodes with IPv6 InternalIP addresses.

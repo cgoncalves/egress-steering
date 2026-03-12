@@ -55,7 +55,8 @@ is_egress_node() {
   echo "$labels" | grep -q 'k8s.ovn.org/egress-assignable'
 }
 
-# Returns lines of "name,IP" for egress nodes that are Ready, sorted by name.
+# Returns lines of "name,ipv4,ipv6" for egress nodes that are Ready, sorted by name.
+# IPv6 field is empty if the node has no IPv6 InternalIP.
 # Returns non-zero on API failure so the caller can distinguish "no nodes" from "API down".
 get_egress_nodes() {
   local output rc
@@ -70,29 +71,33 @@ get_egress_nodes() {
   echo "$output" | jq -r '
     .items[]
     | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))
-    | "\(.metadata.name),\(.status.addresses[] | select(.type=="InternalIP").address)"
+    | .metadata.name as $name
+    | [.status.addresses[] | select(.type=="InternalIP").address] as $ips
+    | ($ips | map(select(test("^[0-9]+\\."))) | first // "") as $v4
+    | ($ips | map(select(test(":"))) | first // "") as $v6
+    | "\($name),\($v4),\($v6)"
   ' | sort
 }
 
-# Returns newline-separated list of reachable egress node IPs.
-# Pings all nodes in parallel to avoid sequential timeout accumulation.
+# Returns newline-separated "ipv4,ipv6" pairs for reachable egress nodes.
+# Pings IPv4 addresses in parallel to avoid sequential timeout accumulation.
 get_healthy_egress_ips() {
   local egress_nodes="$1"
   local pids=() entries=()
 
-  while IFS=',' read -r name ip; do
-    [ -z "$ip" ] && continue
-    entries+=("${name},${ip}")
-    ping -c 1 -W "$PING_TIMEOUT" "$ip" &>/dev/null &
+  while IFS=',' read -r name ipv4 ipv6; do
+    [ -z "$ipv4" ] && continue
+    entries+=("${name},${ipv4},${ipv6}")
+    ping -c 1 -W "$PING_TIMEOUT" "$ipv4" &>/dev/null &
     pids+=($!)
   done <<< "$egress_nodes"
 
   for i in "${!pids[@]}"; do
-    IFS=',' read -r name ip <<< "${entries[$i]}"
+    IFS=',' read -r name ipv4 ipv6 <<< "${entries[$i]}"
     if wait "${pids[$i]}"; then
-      echo "$ip"
+      echo "${ipv4},${ipv6}"
     else
-      echo "[warn] egress node ${name} (${ip}) is Ready but unreachable" >&2
+      echo "[warn] egress node ${name} (${ipv4}) is Ready but unreachable" >&2
     fi
   done
 }
@@ -101,11 +106,11 @@ get_healthy_egress_ips() {
 
 setup_worker() {
   local healthy_ips="$1"
-  local nexthops=""
+  local nexthops_v4="" nexthops_v6=""
 
-  while IFS= read -r ip; do
-    [ -z "$ip" ] && continue
-    nexthops="${nexthops} nexthop via ${ip} weight 1"
+  while IFS=',' read -r ipv4 ipv6; do
+    [ -n "$ipv4" ] && nexthops_v4="${nexthops_v4} nexthop via ${ipv4} weight 1"
+    [ -n "$ipv6" ] && nexthops_v6="${nexthops_v6} nexthop via ${ipv6} weight 1"
   done <<< "$healthy_ips"
 
   # Atomic nftables swap: add new table then flush-and-replace in one transaction.
@@ -118,6 +123,13 @@ setup_worker() {
   # node will re-MASQUERADE to its own IP, and the return path comes back to
   # the worker via the physical network where conntrack un-SNATs back to the
   # Pod IP.
+  #
+  # IPv6 rules are added alongside IPv4 if POD_CIDRS_V6 is configured.
+  local v6_prerouting_rule=""
+  if [ -n "${POD_CIDRS_V6:-}" ]; then
+    v6_prerouting_rule="ip6 saddr ${POD_CIDRS_V6} ip6 daddr != { ${CLUSTER_CIDRS_V6} } ct direction original meta mark set ${FWMARK}"
+  fi
+
   nft -f - <<EOF
 table inet ${NFT_TABLE_WORKER}
 flush table inet ${NFT_TABLE_WORKER}
@@ -125,10 +137,12 @@ table inet ${NFT_TABLE_WORKER} {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
     ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } ct direction original meta mark set ${FWMARK}
+    ${v6_prerouting_rule}
   }
 }
 EOF
 
+  # IPv4 policy routing
   ip rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
   ip rule add fwmark "$FWMARK" table "$RT_TABLE" priority "$RT_PRIO"
 
@@ -136,13 +150,23 @@ EOF
   sysctl -qw net.ipv4.fib_multipath_hash_policy="${FIB_MULTIPATH_HASH_POLICY:-1}"
 
   # table must precede nexthop arguments; intentionally unquoted for word splitting
-  ip route replace default table "$RT_TABLE" ${nexthops}
+  ip route replace default table "$RT_TABLE" ${nexthops_v4}
+
+  # IPv6 policy routing (if configured and IPv6 nexthops are available)
+  if [ -n "${POD_CIDRS_V6:-}" ] && [ -n "$nexthops_v6" ]; then
+    ip -6 rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
+    ip -6 rule add fwmark "$FWMARK" table "$RT_TABLE" priority "$RT_PRIO"
+    ip -6 route replace default table "$RT_TABLE" ${nexthops_v6}
+    sysctl -qw net.ipv6.fib_multipath_hash_policy="${FIB_MULTIPATH_HASH_POLICY:-1}"
+  fi
 }
 
 cleanup_worker() {
   nft delete table inet "$NFT_TABLE_WORKER" 2>/dev/null || true
   ip rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
   ip route flush table "$RT_TABLE" 2>/dev/null || true
+  ip -6 rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
+  ip -6 route flush table "$RT_TABLE" 2>/dev/null || true
 }
 
 setup_egress() {
@@ -164,6 +188,11 @@ setup_egress() {
   # The return path delivers replies to the worker node via the physical
   # network, where the worker's conntrack un-SNATs back to the Pod IP.
   local fwmark_fwd="0x3000"
+  local v6_forward_rule=""
+  if [ -n "${POD_CIDRS_V6:-}" ]; then
+    v6_forward_rule="ip6 daddr != { ${CLUSTER_CIDRS_V6} } meta mark set ${fwmark_fwd}"
+  fi
+
   nft -f - <<EOF
 table inet ${NFT_TABLE_EGRESS}
 flush table inet ${NFT_TABLE_EGRESS}
@@ -171,6 +200,7 @@ table inet ${NFT_TABLE_EGRESS} {
   chain forward {
     type filter hook forward priority filter - 1; policy accept;
     ip daddr != { ${CLUSTER_CIDRS} } meta mark set ${fwmark_fwd}
+    ${v6_forward_rule}
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
@@ -213,7 +243,7 @@ main() {
     exit 1
   fi
 
-  echo "[init] node=${node_name} pod_cidrs=${POD_CIDRS}"
+  echo "[init] node=${node_name} pod_cidrs=${POD_CIDRS}${POD_CIDRS_V6:+ pod_cidrs_v6=${POD_CIDRS_V6}}"
 
   trap 'cleanup_all; exit 0' SIGTERM SIGINT
 
@@ -238,7 +268,7 @@ main() {
     if is_egress_node "$node_name"; then
       local desired_state="egress"
       if [ "$desired_state" != "$LAST_STATE" ]; then
-        echo "[egress] accepting steered traffic for ${POD_CIDRS}"
+        echo "[egress] accepting steered traffic for ${POD_CIDRS}${POD_CIDRS_V6:+ ${POD_CIDRS_V6}}"
         cleanup_worker
         setup_egress
         LAST_STATE="$desired_state"
@@ -246,7 +276,7 @@ main() {
     else
       local self_ip healthy_ips
       self_ip=$(get_self_ip)
-      healthy_ips=$(get_healthy_egress_ips "$egress_nodes" | grep -v "^${self_ip}$")
+      healthy_ips=$(get_healthy_egress_ips "$egress_nodes" | grep -v "^${self_ip},")
 
       if [ -z "$healthy_ips" ]; then
         if [ -n "$LAST_STATE" ]; then
