@@ -25,9 +25,10 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
   │             │      │             │      │  (labeled)  │
   │ Target Pods │      │             │      │             │
   │             │      │             │      │ nftables:   │
-  │ nftables:   │      │ nftables:   │      │ MASQUERADE  │
-  │ fwmark 0x2000      │ fwmark 0x2000      │ (all ifaces)│
-  │             │      │ (no match)  │      │ rp_filter=2 │
+  │ nftables:   │      │ nftables:   │      │ nft fwd:    │
+  │ fwmark 0x2000      │ fwmark 0x2000      │ mark 0x3000 │
+  │             │      │ (no match)  │      │             │
+  │ OVN-K MASQ │      │             │      │ MASQUERADE  │
   │ policy route│      │             │      │             │
   │ table 100   │      │             │      │             │
   └──────┬──────┘      └─────────────┘      └──────┬──────┘
@@ -48,8 +49,9 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 - **Configuration file** (`egress-steering.conf`): defines which Pod IPs/CIDRs to steer, cluster CIDRs, and tuning parameters. Deployed to `/etc/egress-steering/egress-steering.conf`.
 - **Reconciler script** (`egress-steering-reconciler.sh`): bash script running as a systemd service on every worker node. Sources the config file, queries the API for egress node labels and health, then configures local nftables and routing.
 - **MachineConfig** (`machineconfig-egress-steering.yaml`): deploys the script, config file, and systemd unit to all nodes in the worker MachineConfigPool.
-- **nftables**: marks egress-bound packets on worker nodes; performs MASQUERADE on egress nodes.
+- **nftables**: marks egress-bound packets on worker nodes; marks and MASQUERADEs forwarded traffic on egress nodes.
 - **Policy routing**: steers marked packets to egress nodes via a dedicated routing table.
+- **OVN-K MASQUERADE**: on worker nodes, OVN-K's existing `ovn-kube-pod-subnet-masq` SNATs the Pod source IP to the worker node IP before the packet reaches the egress node. The return path uses this conntrack entry to un-SNAT back to the Pod IP.
 
 ## 3. Packet Flow
 
@@ -57,8 +59,8 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 
 ```
 1. Target Pod sends packet to 8.8.8.8
-2. Packet enters host network stack via OVN (local gateway mode)
-3. Worker nftables PREROUTING:
+2. Packet enters host network stack via OVN (routingViaHost: true)
+3. Worker nftables PREROUTING (mangle):
    - src matches POD_CIDRS
    - dst=8.8.8.8 (not in cluster CIDRs)
    - ct direction = original (Pod initiated this connection)
@@ -66,21 +68,26 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 4. Worker routing decision:
    - fwmark 0x2000 → lookup table 100
    - table 100: default via <egress-node-IP> (ECMP if multiple)
-5. Packet forwarded to egress node over physical network
-6. Egress node nftables POSTROUTING:
-   - src matches POD_CIDRS, dst not in CLUSTER_CIDRS
-   → MASQUERADE (src becomes egress node IP)
-7. Packet exits to external network
+5. Worker POSTROUTING:
+   - OVN-K's ovn-kube-pod-subnet-masq MASQUERADE fires
+   → src becomes worker node IP (e.g., 10.6.105.228)
+6. Packet forwarded to egress node over physical network (L2)
+7. Egress node nftables FORWARD (filter - 1):
+   - dst not in CLUSTER_CIDRS → mark set 0x3000
+8. Egress node POSTROUTING:
+   - mark 0x3000 → MASQUERADE (src becomes egress node IP)
+9. Packet exits to external network
 ```
 
 ### Return traffic for Pod-initiated egress
 
 ```
 1. External host replies to egress node IP
-2. Egress node conntrack un-SNATs: dst → original Pod IP
-3. Egress node routes to Pod IP via OVN overlay
-4. Packet delivered to Pod through br-int on the worker
-   (does not traverse host nftables/routing again)
+2. Egress node conntrack un-SNATs: dst → worker node IP
+3. Egress node forwards to worker via physical network (same L2)
+4. Worker receives reply on physical interface
+5. Worker conntrack un-SNATs: dst → original Pod IP
+6. Worker delivers to Pod via OVN
 ```
 
 ### Externally-initiated ingress traffic (untouched)
@@ -99,7 +106,12 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 
 ## 4. Prerequisites
 
-- **OVN-Kubernetes in local gateway mode**: the solution intercepts Pod egress traffic in the host network stack, which requires local gateway mode. In shared gateway mode, OVN handles egress routing in OVS before packets reach the host.
+- **OVN-Kubernetes with `routingViaHost: true` and `ipForwarding: Global`**: the solution intercepts Pod egress traffic in the host network stack, which requires routing via host. `ipForwarding: Global` enables IP forwarding, sets loose-mode `rp_filter`, and changes the FORWARD chain policy to `accept` on all nodes — removing the need to insert rules into OVN-K's iptables-nft managed chains. Enable with:
+  ```bash
+  oc patch network.operator.openshift.io cluster --type=merge \
+    -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"routingViaHost":true,"ipForwarding":"Global"}}}}}'
+  ```
+  This triggers a rolling restart of OVN-Kubernetes pods on all nodes.
 - **Node label**: at least one worker node must be labeled `k8s.ovn.org/egress-assignable=""`.
 - **L2 adjacency**: worker nodes and egress nodes must be on the same L2 network (no tunnels are used between them).
 - **RHCOS / Fedora CoreOS**: the MachineConfig targets OpenShift worker nodes running RHCOS.
@@ -331,9 +343,13 @@ Expected output:
 
 ```
 table inet egress-snat {
+  chain forward {
+    type filter hook forward priority filter - 1; policy accept;
+    ip daddr != { 10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } meta mark set 0x00003000
+  }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr 10.132.2.29 ip daddr != { 10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } masquerade
+    meta mark 0x00003000 masquerade
   }
 }
 ```
@@ -377,10 +393,11 @@ oc debug node/<egress-node> -- chroot /host conntrack -L -s <pod-ip>
 | Reconciler exits with "configuration file not found" | Config file not deployed | Verify `/etc/egress-steering/egress-steering.conf` exists |
 | Reconciler exits with "cannot reach API" | Token expired, CA missing, or wrong API_SERVER | Verify `/etc/egress-steering/token` and `/etc/egress-steering/ca.crt` exist; check `API_SERVER` in config |
 | Reconciler exits with "cannot determine node name" | Node InternalIP mismatch | Check `ip route get 1.1.1.1` returns the correct node IP |
+| nftables counter at 0 on worker | `routingViaHost` not enabled | Verify `oc get network.operator cluster -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.routingViaHost}'` returns `true` |
 | Traffic not steered | Pod not on this node / wrong Pod CIDR | Verify `POD_CIDRS` in config and that the Pod is scheduled on a node with the nftables rule |
 | Traffic black-holed | Egress node not forwarding | Check `ip_forward=1` and `rp_filter=2` on egress node |
-| Return traffic dropped on egress node | Strict rp_filter | Verify `rp_filter=2` on all egress node interfaces |
-| SNAT not happening | Existing SNAT rules don't cover these Pod CIDRs | Add the MASQUERADE rule in `setup_egress` (enabled by default) |
+| Traffic marked but timing out | FORWARD policy is DROP | Verify `ipForwarding: Global` is set: `nft list chain ip filter FORWARD` should show `policy accept` |
+| Return traffic not reaching worker | Egress node not forwarding return traffic | Check `ip_forward=1` on egress node, verify `ipForwarding: Global` |
 
 ## 11. Cleanup and Removal
 
@@ -417,15 +434,14 @@ The cleanup subcommand removes:
 - nftables tables (`egress-steering` and `egress-snat`)
 - Policy routing rule (fwmark `0x2000` → table `100`)
 - Routes in table `100`
-- Restores original `rp_filter` value on egress nodes
 
 ## 12. Limitations and Caveats
 
-- **Local gateway mode only**: this solution intercepts traffic in the host network stack. In shared gateway mode, OVN handles egress routing in OVS and packets never reach the host's nftables.
+- **Requires `routingViaHost: true` and `ipForwarding: Global`**: the solution intercepts traffic in the host network stack (`routingViaHost`) and requires permissive forwarding (`ipForwarding: Global`) so steered traffic isn't dropped by OVN-K's FORWARD chain. Without these, OVN handles egress routing entirely within OVS or drops forwarded packets.
+- **Double SNAT**: traffic is SNATed twice — first by OVN-K on the worker (Pod IP → Worker IP), then by the egress node (Worker IP → Egress IP). The return path reverses both. This means the external destination sees the egress node's IP, but conntrack entries exist on both the worker and egress node.
 - **L2 adjacency required**: worker nodes and egress nodes must be on the same L2 segment. If they are not, a tunnel-based approach (VXLAN or GRE) is needed instead of direct IP routing.
 - **Pod IP stability**: if target Pods are rescheduled and receive new IPs, the configuration must be updated. Use CIDR ranges in `POD_CIDRS` for more stable targeting.
-- **SNAT may already exist**: depending on the OVN-Kubernetes version and configuration, existing SNAT rules on the egress node may already cover Pod traffic. Check before deploying — the MASQUERADE rule in `setup_egress` may be redundant.
-- **Conntrack on egress node**: SNAT conntrack entries live on the egress node. If the egress node fails, all connections through it break regardless of the failover strategy.
+- **Conntrack on both nodes**: SNAT conntrack entries exist on both the worker (Pod IP ↔ Worker IP) and the egress node (Worker IP ↔ Egress IP). If the egress node fails, all connections through it break regardless of the failover strategy.
 - **MachineConfig triggers reboots by default**: without the `MachineConfiguration` node disruption policy patch, applying or removing the MachineConfig causes a rolling reboot. Apply `machineconfiguration-patch.yaml` to restart the service instead of rebooting when the script, config, CA, or token files change.
 - **Configuration changes require MachineConfig update**: since the config file is deployed via MachineConfig, changing `POD_CIDRS` requires updating and re-applying the MachineConfig. With the node disruption policy, this restarts the service without rebooting. Alternatively, edit the config file directly on each node and restart the service — but this change will not persist across MachineConfig re-application.
 - **Single reconciler per node**: the systemd service runs one instance per node. There is no cross-node coordination — each node independently determines its role and selects the same active egress node(s) because the selection is deterministic (sorted by name, filtered by health).

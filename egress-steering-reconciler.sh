@@ -26,7 +26,6 @@ fi
 source "$CONFIG_FILE"
 
 # Derived / internal
-RP_FILTER_ORIG_FILE="/run/egress-steering-rp-filter.orig"
 OC_ARGS="--server=${API_SERVER} --certificate-authority=${CA_FILE} --token=$(cat "${TOKEN_FILE}")"
 
 # --- State tracking ---
@@ -111,6 +110,14 @@ setup_worker() {
 
   # Atomic nftables swap: add new table then flush-and-replace in one transaction.
   # Avoids the brief window where no rules exist.
+  #
+  # prerouting (mangle): marks Pod-initiated egress traffic with fwmark for
+  # policy routing. Uses ct direction original to skip ingress reply traffic.
+  # OVN-K's MASQUERADE (ovn-kube-pod-subnet-masq) will then SNAT the source
+  # to the worker node's IP in POSTROUTING. This is intentional — the egress
+  # node will re-MASQUERADE to its own IP, and the return path comes back to
+  # the worker via the physical network where conntrack un-SNATs back to the
+  # Pod IP.
   nft -f - <<EOF
 table inet ${NFT_TABLE_WORKER}
 flush table inet ${NFT_TABLE_WORKER}
@@ -139,29 +146,35 @@ cleanup_worker() {
 }
 
 setup_egress() {
-  # Save original rp_filter values before overwriting
-  if [ ! -f "$RP_FILTER_ORIG_FILE" ]; then
-    sysctl -a 2>/dev/null | grep '\.rp_filter\s*=' > "$RP_FILTER_ORIG_FILE"
-  fi
-
-  # Set rp_filter to loose mode on all interfaces so packets with Pod source
-  # IPs are not dropped regardless of which interface they arrive on
-  for f in /proc/sys/net/ipv4/conf/*/rp_filter; do
-    echo 2 > "$f"
-  done
-
-  # SNAT rule — remove this block if existing node SNAT rules already
-  # cover these Pod CIDRs (check: nft list ruleset / iptables -t nat -L -n -v).
-  # No oifname constraint: the egress interface depends on the destination
-  # route in the main routing table. Cluster-internal destinations are
-  # excluded to avoid masquerading OVN overlay traffic.
+  # Forwarding and SNAT rules for steered traffic.
+  #
+  # Steered traffic arrives from worker nodes with the worker's IP as source
+  # (OVN-K MASQUERADE on the worker already SNATed Pod IP → Worker IP).
+  #
+  # Prerequisites handled by OVN-K with ipForwarding: Global:
+  # - ip_forward=1 (globally enabled)
+  # - rp_filter=2 (loose mode on all interfaces)
+  # - FORWARD chain policy accept (no need to insert rules into ip filter)
+  #
+  # - forward chain: marks forwarded traffic going to non-cluster destinations
+  #   with FWMARK_FWD to identify it for MASQUERADE in postrouting.
+  # - postrouting chain: MASQUERADE packets marked by the forward chain to the
+  #   egress node's outbound IP.
+  #
+  # The return path delivers replies to the worker node via the physical
+  # network, where the worker's conntrack un-SNATs back to the Pod IP.
+  local fwmark_fwd="0x3000"
   nft -f - <<EOF
 table inet ${NFT_TABLE_EGRESS}
 flush table inet ${NFT_TABLE_EGRESS}
 table inet ${NFT_TABLE_EGRESS} {
+  chain forward {
+    type filter hook forward priority filter - 1; policy accept;
+    ip daddr != { ${CLUSTER_CIDRS} } meta mark set ${fwmark_fwd}
+  }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } masquerade
+    meta mark ${fwmark_fwd} masquerade
   }
 }
 EOF
@@ -169,13 +182,6 @@ EOF
 
 cleanup_egress() {
   nft delete table inet "$NFT_TABLE_EGRESS" 2>/dev/null || true
-  if [ -f "$RP_FILTER_ORIG_FILE" ]; then
-    while IFS='= ' read -r key value; do
-      [ -z "$key" ] && continue
-      sysctl -qw "${key}=${value}" 2>/dev/null || true
-    done < "$RP_FILTER_ORIG_FILE"
-    rm -f "$RP_FILTER_ORIG_FILE"
-  fi
 }
 
 cleanup_all() {
