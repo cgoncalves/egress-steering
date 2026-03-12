@@ -126,8 +126,8 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POD_CIDRS` | `10.132.2.29` | Pod IPs or CIDRs to steer (nftables set syntax) |
-| `CLUSTER_CIDRS` | `10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, link-local CIDRs) |
+| `POD_CIDRS` | `10.132.0.0/14` | Pod IPs or CIDRs to steer (nftables set syntax) |
+| `CLUSTER_CIDRS` | `10.132.0.0/14, 172.30.0.0/16, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, link-local CIDRs) |
 | `API_SERVER` | `https://api-int.example.com:6443` | API server URL |
 | `CA_FILE` | `/etc/egress-steering/ca.crt` | Path to the API server CA certificate |
 | `TOKEN_FILE` | `/etc/egress-steering/token` | Path to the ServiceAccount token file |
@@ -145,14 +145,14 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 ### POD_CIDRS examples
 
 ```bash
+# Full cluster Pod CIDR
+POD_CIDRS="10.132.0.0/14"
+
 # Single IP
 POD_CIDRS="10.132.2.29"
 
 # Multiple IPs
 POD_CIDRS="{ 10.132.2.29, 10.132.2.30 }"
-
-# CIDR range
-POD_CIDRS="10.132.2.0/24"
 
 # Multiple CIDRs
 POD_CIDRS="{ 10.132.2.0/24, 10.132.3.0/24 }"
@@ -326,7 +326,7 @@ The kernel distributes flows across nexthops using a hash of the packet's 5-tupl
 
 | Traffic type | Why excluded |
 |---|---|
-| Cluster-internal (Pod-to-Pod, Pod-to-Service) | Destination in `10.128.0.0/14` or `172.30.0.0/16` |
+| Cluster-internal (Pod-to-Pod, Pod-to-Service) | Destination in `10.132.0.0/14` or `172.30.0.0/16` |
 | DNS to cluster CoreDNS | Service IP `172.30.0.10` is in `172.30.0.0/16` |
 | Link-local / metadata | Destination in `169.254.169.0/29` |
 | Return traffic for externally-initiated connections | `ct direction reply` — nftables rule does not match |
@@ -353,13 +353,13 @@ oc debug node/<node> -- chroot /host cat /etc/egress-steering/egress-steering.co
 oc debug node/<node> -- chroot /host nft list table inet egress-steering
 ```
 
-Expected output (example with single IP):
+Expected output:
 
 ```
 table inet egress-steering {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
-    ip saddr 10.132.2.29 ip daddr != { 10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } ct direction original meta mark set 0x00002000
+    ip saddr 10.132.0.0/14 ip daddr != { 10.132.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } ct direction original meta mark set 0x00002000
   }
 }
 ```
@@ -376,7 +376,7 @@ Expected output:
 table inet egress-snat {
   chain forward {
     type filter hook forward priority filter - 1; policy accept;
-    ip daddr != { 10.128.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } meta mark set 0x00003000
+    ip daddr != { 10.132.0.0/14, 172.30.0.0/16, 169.254.169.0/29 } meta mark set 0x00003000
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
