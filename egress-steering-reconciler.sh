@@ -169,6 +169,41 @@ cleanup_worker() {
   ip -6 route flush table "$RT_TABLE" 2>/dev/null || true
 }
 
+# Block steered traffic when no egress nodes are available. Keeps the nftables
+# marking rules and ip rule in place but replaces the route with an unreachable
+# route so marked packets are dropped instead of falling back to normal routing.
+block_worker() {
+  # Ensure nftables rules and ip rule exist (idempotent — setup_worker is a
+  # no-op if already configured, but we may be called before any setup)
+  local v6_prerouting_rule=""
+  if [ -n "${POD_CIDRS_V6:-}" ]; then
+    v6_prerouting_rule="ip6 saddr ${POD_CIDRS_V6} ip6 daddr != { ${CLUSTER_CIDRS_V6} } ct direction original meta mark set ${FWMARK}"
+  fi
+
+  nft -f - <<EOF
+table inet ${NFT_TABLE_WORKER}
+flush table inet ${NFT_TABLE_WORKER}
+table inet ${NFT_TABLE_WORKER} {
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } ct direction original meta mark set ${FWMARK}
+    ${v6_prerouting_rule}
+  }
+}
+EOF
+
+  ip rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
+  ip rule add fwmark "$FWMARK" table "$RT_TABLE" priority "$RT_PRIO"
+
+  # Replace route with unreachable — marked packets are dropped with ICMP
+  ip route replace unreachable default table "$RT_TABLE"
+  if [ -n "${POD_CIDRS_V6:-}" ]; then
+    ip -6 rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
+    ip -6 rule add fwmark "$FWMARK" table "$RT_TABLE" priority "$RT_PRIO"
+    ip -6 route replace unreachable default table "$RT_TABLE"
+  fi
+}
+
 setup_egress() {
   # Forwarding and SNAT rules for steered traffic.
   #
@@ -257,9 +292,11 @@ main() {
     fi
 
     if [ -z "$egress_nodes" ]; then
-      if [ -n "$LAST_STATE" ]; then
-        echo "[warn] no Ready egress nodes found, cleaning up"
-        cleanup_all
+      if [ "$LAST_STATE" != "blocked" ]; then
+        echo "[warn] no Ready egress nodes found, blocking steered traffic"
+        cleanup_egress
+        block_worker
+        LAST_STATE="blocked"
       fi
       sleep "$RECONCILE_INTERVAL"
       continue
@@ -279,9 +316,11 @@ main() {
       healthy_ips=$(get_healthy_egress_ips "$egress_nodes" | grep -v "^${self_ip},")
 
       if [ -z "$healthy_ips" ]; then
-        if [ -n "$LAST_STATE" ]; then
-          echo "[warn] no reachable egress nodes, cleaning up"
-          cleanup_all
+        if [ "$LAST_STATE" != "blocked" ]; then
+          echo "[warn] no reachable egress nodes, blocking steered traffic"
+          cleanup_egress
+          block_worker
+          LAST_STATE="blocked"
         fi
         sleep "$RECONCILE_INTERVAL"
         continue

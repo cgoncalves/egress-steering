@@ -298,7 +298,7 @@ Each worker pings all candidate egress nodes in parallel before selecting one. N
 - **Worst-case detection time**: ~12 seconds (10s reconcile interval + 2s ping timeout)
 - **On failover**: the ECMP route is rebuilt without the failed node. Flows previously hashed to the failed node will break (conntrack entries are on the failed node). Flows to remaining egress nodes are unaffected.
 - **API unreachable**: if the API server itself is down, the reconciler keeps the current rules in place rather than tearing them down. This prevents unnecessary disruption during control plane outages.
-- **All egress nodes unreachable**: rules are cleaned up and traffic falls back to normal local-node routing.
+- **All egress nodes unreachable**: the route is replaced with an `unreachable` route so steered traffic is dropped rather than falling back to normal local-node routing. The nftables marking rules and ip rule remain in place. Traffic resumes when an egress node becomes available again.
 
 ## 8. ECMP Load Distribution
 
