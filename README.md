@@ -184,19 +184,29 @@ Options:
 ./generate-machineconfig.sh -o output.yaml ... # custom output path
 ```
 
-### Step 5: Apply
+### Step 5: Apply the node disruption policy (optional, recommended)
+
+By default, any MachineConfig change triggers a node reboot. Apply the `MachineConfiguration` patch to restart the `egress-steering` service instead of rebooting when the script, config, CA, or token files change:
+
+```bash
+oc apply -f machineconfiguration-patch.yaml
+```
+
+This only needs to be applied once. Subsequent MachineConfig updates to the egress-steering files will restart the service without rebooting.
+
+### Step 6: Apply the MachineConfig
 
 ```bash
 oc apply -f machineconfig-egress-steering-final.yaml
 ```
 
-This triggers a rolling reboot of all worker nodes managed by the worker MachineConfigPool. Monitor progress:
+If the node disruption policy was applied in step 5, nodes will restart the `egress-steering` service without rebooting. Otherwise, this triggers a rolling reboot. Monitor progress:
 
 ```bash
 oc get mcp worker -w
 ```
 
-### Step 6: Verify
+### Step 7: Verify
 
 After all nodes are updated and running:
 
@@ -374,7 +384,7 @@ oc debug node/<egress-node> -- chroot /host conntrack -L -s <pod-ip>
 oc delete machineconfig 99-egress-steering
 ```
 
-This triggers a rolling reboot of all worker nodes, removing the script, config, token, CA, and systemd unit.
+This removes the script, config, token, CA, and systemd unit. With the node disruption policy, this restarts the service; without it, nodes will reboot.
 
 ### Remove the ServiceAccount and RBAC
 
@@ -410,7 +420,7 @@ The cleanup subcommand removes:
 - **Pod IP stability**: if target Pods are rescheduled and receive new IPs, the configuration must be updated. Use CIDR ranges in `POD_CIDRS` for more stable targeting.
 - **SNAT may already exist**: depending on the OVN-Kubernetes version and configuration, existing SNAT rules on the egress node may already cover Pod traffic. Check before deploying — the MASQUERADE rule in `setup_egress` may be redundant.
 - **Conntrack on egress node**: SNAT conntrack entries live on the egress node. If the egress node fails, all connections through it break regardless of the failover strategy.
-- **MachineConfig triggers reboots**: applying or removing the MachineConfig causes a rolling reboot of all worker nodes. Plan accordingly.
-- **Configuration changes require MachineConfig update**: since the config file is deployed via MachineConfig, changing `POD_CIDRS` requires updating and re-applying the MachineConfig (triggering a rolling reboot). Alternatively, edit the config file directly on each node and restart the service — but this change will not persist across MachineConfig re-application.
+- **MachineConfig triggers reboots by default**: without the `MachineConfiguration` node disruption policy patch, applying or removing the MachineConfig causes a rolling reboot. Apply `machineconfiguration-patch.yaml` to restart the service instead of rebooting when the script, config, CA, or token files change.
+- **Configuration changes require MachineConfig update**: since the config file is deployed via MachineConfig, changing `POD_CIDRS` requires updating and re-applying the MachineConfig. With the node disruption policy, this restarts the service without rebooting. Alternatively, edit the config file directly on each node and restart the service — but this change will not persist across MachineConfig re-application.
 - **Single reconciler per node**: the systemd service runs one instance per node. There is no cross-node coordination — each node independently determines its role and selects the same active egress node(s) because the selection is deterministic (sorted by name, filtered by health).
 - **No IPv6 support**: the nftables rules use `ip saddr` / `ip daddr` (IPv4 only). For dual-stack clusters, add equivalent `ip6` rules.
