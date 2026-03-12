@@ -132,8 +132,8 @@ EOF
   ip rule del fwmark "$FWMARK" table "$RT_TABLE" 2>/dev/null || true
   ip rule add fwmark "$FWMARK" table "$RT_TABLE" priority "$RT_PRIO"
 
-  # L4 hash so flows to the same dest IP can spread across egress nodes
-  sysctl -qw net.ipv4.fib_multipath_hash_policy=1
+  # ECMP hash policy (default: L4 hash so flows to the same dest IP can spread)
+  sysctl -qw net.ipv4.fib_multipath_hash_policy="${FIB_MULTIPATH_HASH_POLICY:-1}"
 
   # table must precede nexthop arguments; intentionally unquoted for word splitting
   ip route replace default table "$RT_TABLE" ${nexthops}
