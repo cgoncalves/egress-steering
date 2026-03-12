@@ -88,7 +88,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 5. Worker POSTROUTING:
    - OVN-K's ovn-kube-pod-subnet-masq MASQUERADE fires
    → src becomes worker node IP (e.g., 10.6.105.228)
-6. Packet forwarded to egress node over physical network (L2)
+6. Packet forwarded to egress node over physical network
 7. Egress node nftables FORWARD (filter - 1):
    - dst not in CLUSTER_CIDRS → mark set 0x3000
 8. Egress node POSTROUTING:
@@ -101,7 +101,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 ```
 1. External host replies to egress node IP
 2. Egress node conntrack un-SNATs: dst → worker node IP
-3. Egress node forwards to worker via physical network (same L2)
+3. Egress node forwards to worker via physical network
 4. Worker receives reply on physical interface
 5. Worker conntrack un-SNATs: dst → original Pod IP
 6. Worker delivers to Pod via OVN
@@ -132,7 +132,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
   oc rollout status daemonset/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
   ```
 - **Node label**: at least one worker node must be labeled `k8s.ovn.org/egress-assignable=""`.
-- **L2 adjacency**: worker nodes and egress nodes must be on the same L2 network (no tunnels are used between them).
+- **IP reachability**: worker nodes and egress nodes must have IP reachability between them.
 - **RHCOS / Fedora CoreOS**: the MachineConfig targets OpenShift worker nodes running RHCOS.
 - **Tools on nodes**: `oc`, `jq`, `nft`, `ping`, `ip`, `sysctl` must be available on the nodes.
 - **API access**: a ServiceAccount with node-list permissions, its token and the API server CA certificate deployed to the nodes (see Deployment).
@@ -489,7 +489,7 @@ The cleanup subcommand removes:
 
 - **Requires `routingViaHost: true` and `ipForwarding: Global`**: the solution intercepts traffic in the host network stack (`routingViaHost`) and requires permissive forwarding (`ipForwarding: Global`) so steered traffic isn't dropped by OVN-K's FORWARD chain. Without these, OVN handles egress routing entirely within OVS or drops forwarded packets.
 - **Double SNAT**: traffic is SNATed twice — first by OVN-K on the worker (Pod IP → Worker IP), then by the egress node (Worker IP → Egress IP). The return path reverses both. This means the external destination sees the egress node's IP, but conntrack entries exist on both the worker and egress node.
-- **L2 adjacency required**: worker nodes and egress nodes must be on the same L2 segment. If they are not, a tunnel-based approach (VXLAN or GRE) is needed instead of direct IP routing.
+- **IP reachability required**: worker nodes and egress nodes must have IP reachability between them. They can be on different L3 subnets as long as intermediate routers forward the traffic.
 - **Pod IP stability**: if target Pods are rescheduled and receive new IPs, the configuration must be updated. Use CIDR ranges in `POD_CIDRS` for more stable targeting.
 - **Conntrack on both nodes**: SNAT conntrack entries exist on both the worker (Pod IP ↔ Worker IP) and the egress node (Worker IP ↔ Egress IP). If the egress node fails, all connections through it break regardless of the failover strategy.
 - **MachineConfig triggers reboots by default**: without the `MachineConfiguration` node disruption policy patch, applying or removing the MachineConfig causes a rolling reboot. Apply `machineconfiguration-patch.yaml` to restart the service instead of rebooting when the script, config, CA, or token files change.
