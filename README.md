@@ -1,5 +1,20 @@
 # Egress Traffic Steering via Designated Egress Nodes
 
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Architecture](#2-architecture)
+3. [Packet Flow](#3-packet-flow)
+4. [Prerequisites](#4-prerequisites)
+5. [Configuration](#5-configuration)
+6. [Deployment](#6-deployment)
+7. [Health Detection and Failover](#7-health-detection-and-failover)
+8. [ECMP Load Distribution](#8-ecmp-load-distribution)
+9. [Scope and Exclusions](#9-scope-and-exclusions)
+10. [Troubleshooting](#10-troubleshooting)
+11. [Cleanup and Removal](#11-cleanup-and-removal)
+12. [Limitations and Caveats](#12-limitations-and-caveats)
+
 ## 1. Overview
 
 This solution steers egress traffic from configured Pod IPs or CIDRs through designated egress nodes — worker nodes labeled `k8s.ovn.org/egress-assignable=""`. Traffic is SNAT'd to the egress node's physical interface IP before leaving the cluster, rather than being SNAT'd to the local worker node's IP.
