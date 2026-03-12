@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="monospace" font-size="12">
+  <style>
+    /* Background */
+    .bg { fill: #1a1a2e; }
+
+    /* Boxes */
+    .box { fill: #16213e; stroke: #0f3460; stroke-width: 2; rx: 8; }
+    .box-egress { fill: #1a1a3e; stroke: #e94560; stroke-width: 2; rx: 8; }
+    .box-external { fill: #0f3460; stroke: #53a8b6; stroke-width: 2; rx: 8; }
+    .box-label { fill: #e0e0e0; font-size: 13px; font-weight: bold; text-anchor: middle; }
+    .box-sublabel { fill: #8888aa; font-size: 10px; text-anchor: middle; }
+
+    /* Legend */
+    .legend-title { fill: #e0e0e0; font-size: 14px; font-weight: bold; }
+    .legend-text { fill: #cccccc; font-size: 11px; }
+
+    /* Title */
+    .title { fill: #ffffff; font-size: 18px; font-weight: bold; text-anchor: middle; }
+    .subtitle { fill: #8888aa; font-size: 12px; text-anchor: middle; }
+
+    /* Egress flow: single packet travels the full round-trip sequentially.
+       0-45%: outbound (Pod -> Worker -> Egress Node -> External) red
+       55-100%: return (External -> Egress Node -> Worker -> Pod) teal
+       Total cycle: 16s */
+    @keyframes egress-roundtrip {
+      0%   { offset-distance: 0%; opacity: 0; }
+      2%   { opacity: 1; }
+      43%  { opacity: 1; }
+      45%  { offset-distance: 100%; opacity: 0; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+    @keyframes egress-return {
+      0%   { offset-distance: 0%; opacity: 0; }
+      55%  { offset-distance: 0%; opacity: 0; }
+      57%  { opacity: 1; }
+      98%  { opacity: 1; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+
+    @keyframes flow-direct {
+      0%   { offset-distance: 0%; opacity: 0; }
+      5%   { opacity: 1; }
+      45%  { opacity: 1; }
+      50%  { offset-distance: 100%; opacity: 0; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+
+    .packet-egress-out {
+      offset-path: path('M 200,230 L 200,340 L 620,340 L 620,230 L 620,340 L 810,340 L 810,230');
+      animation: egress-roundtrip 16s ease-in-out infinite;
+      fill: #e94560;
+    }
+    .packet-egress-ret {
+      offset-path: path('M 810,230 L 810,340 L 620,340 L 620,230 L 620,340 L 200,340 L 200,230');
+      animation: egress-return 16s ease-in-out infinite;
+      fill: #53a8b6;
+    }
+    .packet-pod {
+      offset-path: path('M 200,200 C 300,140 350,140 450,200');
+      animation: flow-direct 8s ease-in-out infinite;
+      fill: #4ecca3;
+    }
+    .packet-svc {
+      offset-path: path('M 200,210 C 250,280 350,320 450,280');
+      animation: flow-direct 9s ease-in-out infinite;
+      animation-delay: 2s;
+      fill: #f0c040;
+    }
+
+    /* SNAT labels flash as the outbound packet passes each hop */
+    @keyframes snat-flash1 {
+      0%, 15%, 25%, 100% { opacity: 0; }
+      17%, 23% { opacity: 1; }
+    }
+    @keyframes snat-flash2 {
+      0%, 30%, 42%, 100% { opacity: 0; }
+      33%, 40% { opacity: 1; }
+    }
+    .snat-label {
+      fill: #e94560;
+      font-size: 9px;
+      font-weight: bold;
+      text-anchor: middle;
+      animation: snat-flash1 16s ease-in-out infinite;
+    }
+    .snat-label2 {
+      fill: #e94560;
+      font-size: 9px;
+      font-weight: bold;
+      text-anchor: middle;
+      animation: snat-flash2 16s ease-in-out infinite;
+    }
+  </style>
+
+  <!-- Background -->
+  <rect class="bg" width="900" height="520"/>
+
+  <!-- Title -->
+  <text class="title" x="450" y="35">Egress Steering Traffic Flows</text>
+  <text class="subtitle" x="450" y="52">Pod-initiated external traffic is steered via egress node; cluster-internal traffic is direct</text>
+
+  <!-- Cluster boundary -->
+  <rect x="30" y="70" width="720" height="250" rx="12" fill="none" stroke="#333355" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="45" y="88" fill="#555577" font-size="11">OpenShift Cluster</text>
+
+  <!-- Worker Node -->
+  <rect class="box" x="60" y="110" width="280" height="190"/>
+  <text class="box-label" x="200" y="135">Worker Node</text>
+  <text class="box-sublabel" x="200" y="150">10.6.105.228</text>
+
+  <!-- Source Pod -->
+  <rect x="100" y="170" width="120" height="50" rx="6" fill="#1e3a5f" stroke="#4ecca3" stroke-width="1.5"/>
+  <text class="box-label" x="160" y="193" font-size="11">Pod</text>
+  <text class="box-sublabel" x="160" y="207">10.135.0.14</text>
+
+  <!-- nftables label -->
+  <text x="245" y="185" fill="#e94560" font-size="9" text-anchor="middle">nft: mark</text>
+  <text x="245" y="196" fill="#e94560" font-size="9" text-anchor="middle">0x2000</text>
+
+  <!-- Dest Pod -->
+  <rect x="390" y="150" width="120" height="50" rx="6" fill="#1e3a5f" stroke="#4ecca3" stroke-width="1.5"/>
+  <text class="box-label" x="450" y="173" font-size="11">Pod B</text>
+  <text class="box-sublabel" x="450" y="187">10.135.1.5</text>
+
+  <!-- K8s Service -->
+  <rect x="390" y="240" width="120" height="50" rx="6" fill="#1e3a5f" stroke="#f0c040" stroke-width="1.5"/>
+  <text class="box-label" x="450" y="263" font-size="11">Service</text>
+  <text class="box-sublabel" x="450" y="277">172.30.10.50</text>
+
+  <!-- Egress Node -->
+  <rect class="box-egress" x="560" y="110" width="180" height="190"/>
+  <text class="box-label" x="650" y="135">Egress Node</text>
+  <text class="box-sublabel" x="650" y="150">10.6.105.51</text>
+
+  <!-- Egress nftables -->
+  <text x="650" y="175" fill="#e94560" font-size="9" text-anchor="middle">nft: mark 0x3000</text>
+  <text x="650" y="186" fill="#e94560" font-size="9" text-anchor="middle">MASQUERADE</text>
+
+  <!-- External -->
+  <rect class="box-external" x="770" y="110" width="110" height="190"/>
+  <text class="box-label" x="825" y="135">External</text>
+  <text class="box-sublabel" x="825" y="150">1.1.1.1</text>
+
+  <!-- Flow 1: Egress (steered) - Pod to Egress Node, Egress Node to External -->
+  <path d="M 200,230 L 200,340 L 620,340 L 620,230" fill="none" stroke="#e94560" stroke-width="1" stroke-dasharray="4,3" opacity="0.3"/>
+  <path d="M 620,230 L 620,340 L 810,340 L 810,230" fill="none" stroke="#e94560" stroke-width="1" stroke-dasharray="4,3" opacity="0.3"/>
+
+  <!-- Flow 2: Pod-to-Pod -->
+  <path d="M 200,200 C 300,140 350,140 450,200" fill="none" stroke="#4ecca3" stroke-width="1" stroke-dasharray="4,3" opacity="0.3"/>
+
+  <!-- Flow 3: Pod-to-Service -->
+  <path d="M 200,210 C 250,280 350,320 450,280" fill="none" stroke="#f0c040" stroke-width="1" stroke-dasharray="4,3" opacity="0.3"/>
+
+  <!-- Animated packets -->
+  <circle class="packet-egress-out" r="5"/>
+  <circle class="packet-egress-ret" r="4"/>
+  <circle class="packet-pod" r="5"/>
+  <circle class="packet-svc" r="5"/>
+
+  <!-- SNAT labels that flash -->
+  <text class="snat-label" x="200" y="360">SNAT: Pod IP -> Worker IP</text>
+  <text class="snat-label2" x="720" y="360">SNAT: Worker IP -> Egress Node IP</text>
+
+  <!-- Legend -->
+  <rect x="40" y="410" width="820" height="95" rx="8" fill="#16213e" stroke="#333355" stroke-width="1"/>
+  <text class="legend-title" x="60" y="432">Traffic Flows</text>
+
+  <!-- Legend items -->
+  <circle cx="70" cy="452" r="5" fill="#e94560"/>
+  <text class="legend-text" x="85" y="456">External egress (steered via egress node, double SNAT)</text>
+
+  <circle cx="70" cy="472" r="4" fill="#53a8b6"/>
+  <text class="legend-text" x="85" y="476">External return (un-SNAT on egress, un-SNAT on worker)</text>
+
+  <circle cx="500" cy="452" r="5" fill="#4ecca3"/>
+  <text class="legend-text" x="515" y="456">Pod-to-Pod (direct via OVN, not steered)</text>
+
+  <circle cx="500" cy="472" r="5" fill="#f0c040"/>
+  <text class="legend-text" x="515" y="476">Pod-to-Service (direct via OVN, not steered)</text>
+
+  <text class="legend-text" x="60" y="496" fill="#8888aa">Steered traffic exits the cluster with the egress node's IP. Cluster-internal traffic (Pods, Services, DNS) is never steered.</text>
+</svg>
