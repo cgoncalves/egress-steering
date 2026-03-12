@@ -148,25 +148,31 @@ Update `CLUSTER_CIDRS` to match your cluster's Pod and Service CIDRs.
 
 ## 6. Deployment
 
-### Step 1: Label egress nodes
+### Step 1: Export kubeconfig
+
+```bash
+export KUBECONFIG=/path/to/kubeconfig
+```
+
+### Step 2: Label egress nodes
 
 ```bash
 oc label node <node-name> k8s.ovn.org/egress-assignable=""
 ```
 
-### Step 2: Create ServiceAccount and extract credentials
+### Step 3: Create ServiceAccount and extract credentials
 
 ```bash
 ./setup-serviceaccount.sh create -o /tmp/egress-steering-creds
 ```
 
-This creates the ServiceAccount, ClusterRole, ClusterRoleBinding, and token Secret, then extracts the CA certificate and token to the output directory.
+This creates the ServiceAccount, ClusterRole, ClusterRoleBinding, and token Secret, then extracts the API server URL and CA certificate from the kubeconfig and the token from the Secret. `API_SERVER` in `egress-steering.conf` is auto-populated from the exported kubeconfig.
 
-### Step 3: Edit the configuration
+### Step 4: Edit the configuration
 
-Edit `egress-steering.conf` to set `POD_CIDRS`, `CLUSTER_CIDRS`, and `API_SERVER` for your environment.
+Edit `egress-steering.conf` to set `POD_CIDRS` and `CLUSTER_CIDRS` for your environment.
 
-### Step 4: Generate the final MachineConfig
+### Step 5: Generate the final MachineConfig
 
 ```bash
 ./generate-machineconfig.sh \
@@ -184,7 +190,7 @@ Options:
 ./generate-machineconfig.sh -o output.yaml ... # custom output path
 ```
 
-### Step 5: Apply the node disruption policy (optional, recommended)
+### Step 6: Apply the node disruption policy (optional, recommended)
 
 By default, any MachineConfig change triggers a node reboot. Apply the `MachineConfiguration` patch to restart the `egress-steering` service instead of rebooting when the script, config, CA, or token files change:
 
@@ -194,19 +200,19 @@ oc apply -f machineconfiguration-patch.yaml
 
 This only needs to be applied once. Subsequent MachineConfig updates to the egress-steering files will restart the service without rebooting.
 
-### Step 6: Apply the MachineConfig
+### Step 7: Apply the MachineConfig
 
 ```bash
 oc apply -f machineconfig-egress-steering-final.yaml
 ```
 
-If the node disruption policy was applied in step 5, nodes will restart the `egress-steering` service without rebooting. Otherwise, this triggers a rolling reboot. Monitor progress:
+If the node disruption policy was applied in step 6, nodes will restart the `egress-steering` service without rebooting. Otherwise, this triggers a rolling reboot. Monitor progress:
 
 ```bash
 oc get mcp worker -w
 ```
 
-### Step 7: Verify
+### Step 8: Verify
 
 After all nodes are updated and running:
 
