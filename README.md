@@ -108,10 +108,12 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 
 - **OVN-Kubernetes with `routingViaHost: true` and `ipForwarding: Global`**: the solution intercepts Pod egress traffic in the host network stack, which requires routing via host. `ipForwarding: Global` enables IP forwarding, sets loose-mode `rp_filter`, and changes the FORWARD chain policy to `accept` on all nodes — removing the need to insert rules into OVN-K's iptables-nft managed chains. Enable with:
   ```bash
-  oc patch network.operator.openshift.io cluster --type=merge \
-    -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"routingViaHost":true,"ipForwarding":"Global"}}}}}'
+  oc apply -f network-operator-patch.yaml
   ```
-  This triggers a rolling restart of OVN-Kubernetes pods on all nodes.
+  This triggers a rolling restart of OVN-Kubernetes pods on all nodes. Wait for the rollout:
+  ```bash
+  oc rollout status daemonset/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
+  ```
 - **Node label**: at least one worker node must be labeled `k8s.ovn.org/egress-assignable=""`.
 - **L2 adjacency**: worker nodes and egress nodes must be on the same L2 network (no tunnels are used between them).
 - **RHCOS / Fedora CoreOS**: the MachineConfig targets OpenShift worker nodes running RHCOS.
@@ -134,6 +136,7 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 | `RT_PRIO` | `1000` | Priority of the ip rule |
 | `RECONCILE_INTERVAL` | `10` | Seconds between reconciliation cycles |
 | `PING_TIMEOUT` | `2` | Seconds to wait for ping reply from egress node |
+| `FIB_MULTIPATH_HASH_POLICY` | `1` | ECMP hash policy: `0` = L3 only, `1` = L4 (includes ports) |
 | `NFT_TABLE_WORKER` | `egress-steering` | nftables table name on worker nodes |
 | `NFT_TABLE_EGRESS` | `egress-snat` | nftables table name on egress nodes |
 
@@ -239,6 +242,14 @@ oc debug node/<worker-node> -- chroot /host nft list table inet egress-steering
 oc debug node/<worker-node> -- chroot /host ip rule show
 oc debug node/<worker-node> -- chroot /host ip route show table 100
 ```
+
+### Step 9: Run E2E tests (optional)
+
+```bash
+./test-e2e.sh
+```
+
+This creates a temporary test namespace and pod, verifies the service is running on all nodes, checks nftables and routing rules, tests external connectivity and traffic steering, and confirms cluster-internal traffic is unaffected.
 
 ## 7. Health Detection and Failover
 
