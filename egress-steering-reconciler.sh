@@ -128,8 +128,8 @@ EOF
   # L4 hash so flows to the same dest IP can spread across egress nodes
   sysctl -qw net.ipv4.fib_multipath_hash_policy=1
 
-  # Intentionally unquoted: word splitting expands nexthop arguments
-  ip route replace default ${nexthops} table "$RT_TABLE"
+  # table must precede nexthop arguments; intentionally unquoted for word splitting
+  ip route replace default table "$RT_TABLE" ${nexthops}
 }
 
 cleanup_worker() {
