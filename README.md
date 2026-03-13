@@ -63,7 +63,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 
 ### Components
 
-- **Configuration file** (`egress-steering.conf`): defines which Pod IPs/CIDRs to steer, cluster CIDRs, and tuning parameters. Deployed to `/etc/egress-steering/egress-steering.conf`.
+- **Configuration file** (`egress-steering.conf`): defines which Pod IPs/CIDRs to steer, excluded CIDRs, and tuning parameters. Deployed to `/etc/egress-steering/egress-steering.conf`.
 - **Reconciler script** (`egress-steering-reconciler.sh`): bash script running as a systemd service on every worker node. Sources the config file, queries the API for egress node labels and health, then configures local nftables and routing.
 - **MachineConfig** (`machineconfig-egress-steering.yaml`): deploys the script, config file, and systemd unit to all nodes in the worker MachineConfigPool.
 - **nftables**: marks egress-bound packets on worker nodes; marks and MASQUERADEs forwarded traffic on egress nodes.
@@ -79,7 +79,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 2. Packet enters host network stack via OVN (routingViaHost: true)
 3. Worker nftables PREROUTING (mangle):
    - src matches POD_CIDRS
-   - dst=8.8.8.8 (not in cluster CIDRs)
+   - dst=8.8.8.8 (not in EXCLUDE_CIDRS)
    - ct direction = original (Pod initiated this connection)
    → meta mark set 0x2000
 4. Worker routing decision:
@@ -90,7 +90,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
    → src becomes worker node IP (e.g., 10.6.105.228)
 6. Packet forwarded to egress node over physical network
 7. Egress node nftables FORWARD (filter - 1):
-   - dst not in CLUSTER_CIDRS → mark set 0x3000
+   - dst not in EXCLUDE_CIDRS → mark set 0x3000
 8. Egress node POSTROUTING:
    - mark 0x3000 → MASQUERADE (src becomes egress node IP)
 9. Packet exits to external network
@@ -115,7 +115,7 @@ Only external application traffic from the configured Pod IPs/CIDRs is steered. 
 3. Pod replies: src=Pod IP, dst=external
 4. Worker nftables PREROUTING:
    - src matches POD_CIDRS
-   - dst=external (not in cluster CIDRs)
+   - dst=external (not in EXCLUDE_CIDRS)
    - ct direction = reply (external initiated this connection)
    → NO mark applied
 5. Normal routing → exits via local node (standard SNAT)
@@ -144,12 +144,12 @@ All configuration lives in `/etc/egress-steering/egress-steering.conf` (source f
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `POD_CIDRS` | `10.132.0.0/14` | Pod IPs or CIDRs to steer (nftables set syntax) |
-| `CLUSTER_CIDRS` | `10.132.0.0/14, 172.30.0.0/16, 10.6.105.0/24, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, Machine, link-local CIDRs) |
+| `EXCLUDE_CIDRS` | `10.132.0.0/14, 172.30.0.0/16, 10.6.105.0/24, 169.254.169.0/29` | Destinations excluded from steering (Pod, Service, Machine, link-local CIDRs) |
 | `API_SERVER` | `https://api-int.example.com:6443` | API server URL |
 | `CA_FILE` | `/etc/egress-steering/ca.crt` | Path to the API server CA certificate |
 | `TOKEN_FILE` | `/etc/egress-steering/token` | Path to the ServiceAccount token file |
 | `POD_CIDRS_V6` | *(empty)* | IPv6 Pod CIDRs to steer (optional, nftables set syntax) |
-| `CLUSTER_CIDRS_V6` | *(empty)* | IPv6 cluster-internal CIDRs excluded from steering (required if `POD_CIDRS_V6` is set) |
+| `EXCLUDE_CIDRS_V6` | *(empty)* | IPv6 CIDRs excluded from steering (required if `POD_CIDRS_V6` is set) |
 | `FWMARK` | `0x2000` | Packet mark for policy routing (must not conflict with other fwmarks) |
 | `RT_TABLE` | `100` | Routing table number for steered traffic |
 | `RT_PRIO` | `1000` | Priority of the ip rule |
@@ -178,7 +178,7 @@ POD_CIDRS="{ 10.132.2.0/24, 10.132.3.0/24 }"
 POD_CIDRS="{ 10.132.2.29, 10.132.3.0/24 }"
 ```
 
-Update `CLUSTER_CIDRS` to match your cluster's Pod, Service, and Machine network CIDRs.
+Update `EXCLUDE_CIDRS` to include your cluster's Pod, Service, and Machine network CIDRs.
 
 ## 6. Deployment
 
@@ -204,7 +204,7 @@ This creates the ServiceAccount, ClusterRole, ClusterRoleBinding, and token Secr
 
 ### Step 4: Edit the configuration
 
-Edit `egress-steering.conf` to set `POD_CIDRS` and `CLUSTER_CIDRS` for your environment.
+Edit `egress-steering.conf` to set `POD_CIDRS` and `EXCLUDE_CIDRS` for your environment.
 
 ### Step 5: Generate the final MachineConfig
 
@@ -338,7 +338,7 @@ The kernel distributes flows across nexthops using a hash of the packet's 5-tupl
 
 ### Traffic that IS steered
 
-- Packets from IPs/CIDRs matching `POD_CIDRS` to destinations outside `CLUSTER_CIDRS`, where the connection was initiated by the Pod (`ct direction original`).
+- Packets from IPs/CIDRs matching `POD_CIDRS` to destinations outside `EXCLUDE_CIDRS`, where the connection was initiated by the Pod (`ct direction original`).
 
 ### Traffic that is NOT steered
 
@@ -495,4 +495,4 @@ The cleanup subcommand removes:
 - **MachineConfig triggers reboots by default**: without the `MachineConfiguration` node disruption policy patch, applying or removing the MachineConfig causes a rolling reboot. Apply `machineconfiguration-patch.yaml` to restart the service instead of rebooting when the script, config, CA, or token files change.
 - **Configuration changes require MachineConfig update**: since the config file is deployed via MachineConfig, changing `POD_CIDRS` requires updating and re-applying the MachineConfig. With the node disruption policy, this restarts the service without rebooting. Alternatively, edit the config file directly on each node and restart the service — but this change will not persist across MachineConfig re-application.
 - **Single reconciler per node**: the systemd service runs one instance per node. There is no cross-node coordination — each node independently determines its role and selects the same active egress node(s) because the selection is deterministic (sorted by name, filtered by health).
-- **IPv6 support is optional**: set `POD_CIDRS_V6` and `CLUSTER_CIDRS_V6` to enable IPv6 steering. Both IPv4 and IPv6 rules coexist in the same `inet` family nftables table. IPv6 policy routing requires egress nodes with IPv6 InternalIP addresses.
+- **IPv6 support is optional**: set `POD_CIDRS_V6` and `EXCLUDE_CIDRS_V6` to enable IPv6 steering. Both IPv4 and IPv6 rules coexist in the same `inet` family nftables table. IPv6 policy routing requires egress nodes with IPv6 InternalIP addresses.

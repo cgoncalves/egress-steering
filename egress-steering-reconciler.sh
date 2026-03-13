@@ -127,7 +127,7 @@ setup_worker() {
   # IPv6 rules are added alongside IPv4 if POD_CIDRS_V6 is configured.
   local v6_prerouting_rule=""
   if [ -n "${POD_CIDRS_V6:-}" ]; then
-    v6_prerouting_rule="ip6 saddr ${POD_CIDRS_V6} ip6 daddr != { ${CLUSTER_CIDRS_V6} } ct direction original meta mark set ${FWMARK}"
+    v6_prerouting_rule="ip6 saddr ${POD_CIDRS_V6} ip6 daddr != { ${EXCLUDE_CIDRS_V6} } ct direction original meta mark set ${FWMARK}"
   fi
 
   nft -f - <<EOF
@@ -136,7 +136,7 @@ flush table inet ${NFT_TABLE_WORKER}
 table inet ${NFT_TABLE_WORKER} {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
-    ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } ct direction original meta mark set ${FWMARK}
+    ip saddr ${POD_CIDRS} ip daddr != { ${EXCLUDE_CIDRS} } ct direction original meta mark set ${FWMARK}
     ${v6_prerouting_rule}
   }
 }
@@ -177,7 +177,7 @@ block_worker() {
   # no-op if already configured, but we may be called before any setup)
   local v6_prerouting_rule=""
   if [ -n "${POD_CIDRS_V6:-}" ]; then
-    v6_prerouting_rule="ip6 saddr ${POD_CIDRS_V6} ip6 daddr != { ${CLUSTER_CIDRS_V6} } ct direction original meta mark set ${FWMARK}"
+    v6_prerouting_rule="ip6 saddr ${POD_CIDRS_V6} ip6 daddr != { ${EXCLUDE_CIDRS_V6} } ct direction original meta mark set ${FWMARK}"
   fi
 
   nft -f - <<EOF
@@ -186,7 +186,7 @@ flush table inet ${NFT_TABLE_WORKER}
 table inet ${NFT_TABLE_WORKER} {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
-    ip saddr ${POD_CIDRS} ip daddr != { ${CLUSTER_CIDRS} } ct direction original meta mark set ${FWMARK}
+    ip saddr ${POD_CIDRS} ip daddr != { ${EXCLUDE_CIDRS} } ct direction original meta mark set ${FWMARK}
     ${v6_prerouting_rule}
   }
 }
@@ -225,7 +225,7 @@ setup_egress() {
   local fwmark_fwd="0x3000"
   local v6_forward_rule=""
   if [ -n "${POD_CIDRS_V6:-}" ]; then
-    v6_forward_rule="ip6 daddr != { ${CLUSTER_CIDRS_V6} } meta mark set ${fwmark_fwd}"
+    v6_forward_rule="ip6 daddr != { ${EXCLUDE_CIDRS_V6} } meta mark set ${fwmark_fwd}"
   fi
 
   nft -f - <<EOF
@@ -234,7 +234,7 @@ flush table inet ${NFT_TABLE_EGRESS}
 table inet ${NFT_TABLE_EGRESS} {
   chain forward {
     type filter hook forward priority filter - 1; policy accept;
-    ip daddr != { ${CLUSTER_CIDRS} } meta mark set ${fwmark_fwd}
+    ip daddr != { ${EXCLUDE_CIDRS} } meta mark set ${fwmark_fwd}
     ${v6_forward_rule}
   }
   chain postrouting {
