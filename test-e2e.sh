@@ -106,8 +106,12 @@ spec:
     image: ${TEST_IMAGE}
     command: ["/bin/bash", "-c", "sleep infinity"]
     securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
       capabilities:
-        add: ["NET_ADMIN"]
+        drop: ["ALL"]
 EOF
 
   if ! oc wait pod/"$TEST_POD" -n "$TEST_NS" --for=condition=Ready --timeout=120s &>/dev/null; then
