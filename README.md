@@ -23,8 +23,6 @@ A bash reconciler script, deployed as a systemd service via MachineConfig, runs 
 
 Only external application traffic from the configured Pod IPs/CIDRs is steered. All other traffic — DNS, logging, metrics, infrastructure pods, and return traffic from externally-initiated connections — exits normally via the local node.
 
-![Traffic Flows](docs/egress-steering-traffic-flows.svg)
-
 ## 2. Architecture
 
 ```
