@@ -43,7 +43,7 @@ get_node_name() {
   oc ${OC_ARGS} get nodes -o json 2>/dev/null \
   | jq -r --arg ip "$self_ip" '
     .items[]
-    | select(.status.addresses[] | select(.type=="InternalIP" and .address==$ip))
+    | select(.status.addresses[]? | select(.type=="InternalIP" and .address==$ip))
     | .metadata.name
   ' | head -1
 }
@@ -70,9 +70,9 @@ get_egress_nodes() {
   fi
   echo "$output" | jq -r '
     .items[]
-    | select(.status.conditions[] | select(.type=="Ready" and .status=="True"))
+    | select(.status.conditions[]? | select(.type=="Ready" and .status=="True"))
     | .metadata.name as $name
-    | [.status.addresses[] | select(.type=="InternalIP").address] as $ips
+    | [.status.addresses[]? | select(.type=="InternalIP").address] as $ips
     | ($ips | map(select(test("^[0-9]+\\."))) | first // "") as $v4
     | ($ips | map(select(test(":"))) | first // "") as $v6
     | "\($name),\($v4),\($v6)"
